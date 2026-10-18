@@ -230,7 +230,7 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 18) {
                 if m.hotStreak >= 2 && !m.bannerDismissed, let mo = m.history.last(where: { !$0.topCPU.isEmpty }) { HotBanner(moment: mo) }
                 SectionTitle(title: "What is using the machine", aspect: .gpu)
-                ProcessDie().frame(height: 450)
+                ProcessDie()
 
                 SpikeTimeline()
 
@@ -296,7 +296,8 @@ struct ProcessDie: View {
     @Environment(\.colorScheme) private var scheme
     @State private var byCPU = false
     @State private var hover: String?
-    @State private var path: [String] = []   // "g:<group>" · "groups:<names>" · "procs:<pids>" · "free"
+    // -drill <group> opens the die inside that group (used to capture screenshots).
+    @State private var path: [String] = CommandLine.arguments.firstIndex(of: "-drill").map { ["g:" + CommandLine.arguments[$0 + 1]] } ?? []   // "g:<group>" · "groups:<names>" · "procs:<pids>" · "free"
     static let sep = "\u{1}"
 
     func amount(_ cpu: Double, _ mem: UInt64) -> Int64 { Int64(byCPU ? cpu * 1000 : Double(mem)) }
@@ -402,8 +403,31 @@ struct ProcessDie: View {
                     }
                 }
             }
+            .frame(height: 380)
+            // Inside a group: its biggest processes as a list, explained, since most fold into "smaller items".
+            if path.last?.hasPrefix("g:") == true || path.last?.hasPrefix("procs:") == true {
+                let list = all.compactMap { b in m.procs.first { "p:\($0.pid)" == b.id }.map { (b, $0) } }.prefix(6)
+                Panel(aspect: .gpu, padding: 10) {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("Biggest inside \(title(path.last!)) · by \(byCPU ? "CPU" : "memory")").hudLabel(Aspect.gpu.color.readable(scheme))
+                        ForEach(list, id: \.0.id) { b, p in
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 8) {
+                                    Text(b.value ?? "").font(.system(size: 11, weight: .semibold, design: .monospaced)).monospacedDigit().frame(width: 76, alignment: .trailing)
+                                    Text(p.name).font(.system(size: 11.5, weight: .medium)).lineLimit(1)
+                                    Text("pid \(p.pid) · \(m.owner(p))").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                                    Spacer(minLength: 0)
+                                }
+                                if let e = Explain.of(p.name) { ExplainLine(e: e).padding(.leading, 84) }
+                            }
+                            .background(Rectangle().fill(hover == b.id ? Aspect.gpu.color.opacity(0.08) : .clear))
+                            .onHover { hover = $0 ? b.id : (hover == b.id ? nil : hover) }
+                        }
+                    }
+                }
+            }
             Text(path.last?.hasPrefix("g:") == true || path.last?.hasPrefix("procs:") == true
-                 ? "Click a process to open it in Processes."
+                 ? "Click a process to open it in Processes. Hover one to see what it is."
                  : "Click a block to see what's inside it.").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
         }
     }

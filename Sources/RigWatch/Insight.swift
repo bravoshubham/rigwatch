@@ -214,6 +214,7 @@ struct TopSheet: View {
 
     @ViewBuilder func procRow(_ p: Proc, byCPU: Bool) -> some View {
         let f = m.fix(p)
+        VStack(alignment: .leading, spacing: 2) {
         HStack(spacing: 8) {
             Text("└").font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary).padding(.leading, 26)
             Text(p.name).font(.system(size: 11.5)).lineLimit(1).help(p.path)
@@ -229,6 +230,8 @@ struct TopSheet: View {
             }
             Button { m.top = nil; m.procSearch = "\(p.pid)"; m.tab = .processes } label: { Image(systemName: "magnifyingglass") }
                 .buttonStyle(HUDButton(color: Aspect.process.color)).help("Show in Processes")
+        }
+        if let e = Explain.of(p.name) { ExplainLine(e: e).padding(.leading, 40) }
         }
     }
 }
@@ -364,5 +367,16 @@ struct SpikeTimeline: View {
                 }
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// One process explained in a line: what it is, then what to do; why it gets busy on hover.
+struct ExplainLine: View {
+    let e: Explanation
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        (Text(e.what + " ").foregroundStyle(.secondary) + Text("Do: ").foregroundStyle(Color(hex: 0x3DDC97).readable(scheme)) + Text(e.todo).foregroundStyle(.primary))
+            .font(.system(size: 10.5)).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            .help("Why it gets busy: " + e.why)
     }
 }
