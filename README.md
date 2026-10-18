@@ -27,9 +27,11 @@ Run a few coding agents on a Mac for a day and this is what you find:
 - Thirty worktrees the agents created, each with its own `node_modules` or build folder, and no idea
   which ones are safe to delete.
 - An emulator or simulator nobody has touched since Tuesday, still holding 6 GB.
+- A local model in Ollama, LM Studio or llama.cpp holding 40 GB of memory and keeping the GPU busy
+  while your build crawls.
 - Docker, package caches, DerivedData and Gradle quietly taking 200 GB of disk.
 
-Web, backend or mobile, it is the same story.
+Web, backend, mobile or local AI, it is the same story.
 
 Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups everything by
 **who started it**, shows it as one picture, and closes what you don't need behind a confirmation.
@@ -38,7 +40,7 @@ Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups eve
 
 | Page | What you get |
 | --- | --- |
-| **Overview** | A chip-die map of the machine, sized by memory or CPU. Click any block to see what's inside it. Live CPU, memory, GPU, disk, network and chip temperature. |
+| **Overview** | A chip-die map of the machine, sized by memory or CPU. Click any block to see what's inside it. Live CPU, memory, GPU load and GPU memory, disk, network and chip temperature, so a local model's load is visible next to everything else. |
 | **Agent Sessions** | Every coding agent running, with its CPU, memory, devices, worktrees and every process it started: dev servers, test runners, MCP servers, builds. Claude Code, OpenCode and Codex also show the session title and last prompt, and can be resumed. Cursor, Windsurf, T3 Code, Gemini CLI, Aider, Goose and Amp are recognised from their processes. |
 | **Dev Servers** | Every local server you started, by the port it listens on: a framework guess (Vite, Next.js, Storybook, Rails, Django, uvicorn and more), project folder, uptime, CPU and memory, and which agent session started it. That link is remembered, so a server left running after its session ended still says who started it. Open it in the browser, or stop it behind a confirmation. |
 | **Emulators & Simulators** | Each Android emulator and iOS simulator: what it's showing, which session launched it, the last command a session ran on it, a live screen, and a graceful shut-down. |
