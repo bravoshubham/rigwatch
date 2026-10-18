@@ -40,6 +40,7 @@ Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups eve
 | --- | --- |
 | **Overview** | A chip-die map of the machine, sized by memory or CPU. Click any block to see what's inside it. Live CPU, memory, GPU, disk, network and chip temperature. |
 | **Agent Sessions** | Every coding agent running, with its CPU, memory, devices, worktrees and every process it started: dev servers, test runners, MCP servers, builds. Claude Code, OpenCode and Codex also show the session title and last prompt, and can be resumed. Cursor, Windsurf, T3 Code, Gemini CLI, Aider, Goose and Amp are recognised from their processes. |
+| **Dev Servers** | Every local server you started, by the port it listens on: a framework guess (Vite, Next.js, Storybook, Rails, Django, uvicorn and more), project folder, uptime, CPU and memory, and which agent session started it. That link is remembered, so a server left running after its session ended still says who started it. Open it in the browser, or stop it behind a confirmation. |
 | **Emulators & Simulators** | Each Android emulator and iOS simulator: what it's showing, which session launched it, the last command a session ran on it, a live screen, and a graceful shut-down. |
 | **Processes** | Grouped by app or tool, with CPU on one scale (100% = the whole machine) and quit or force-quit behind a confirmation. |
 | **Memory** | Where the RAM went: apps, wired, compressed, file cache, swap and pressure. |
@@ -49,6 +50,9 @@ Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups eve
 <p align="center">
   <img src="docs/screenshots/sessions-dark.png" width="49%" alt="Agent sessions">
   <img src="docs/screenshots/disk-dark.png" width="49%" alt="Disk map">
+</p>
+<p align="center">
+  <img src="docs/screenshots/servers-dark.png" width="49%" alt="Dev servers">
 </p>
 <p align="center">
   <img src="docs/screenshots/devices-dark.png" width="49%" alt="Emulators and simulators">
@@ -114,6 +118,8 @@ or closed while it is on. Every screenshot above was taken in it.
 - Samples every 5 seconds while the window is open (3, 5 or 10 s in the sidebar) and once a minute
   when it is hidden. Typically 0.1–2% of one core and 150–250 MB.
 - Machine-wide numbers come from Mach, sysctl and IOKit directly, with no helper processes.
+- Listening ports come from libproc, not `lsof`, at most every 3 seconds and only for processes
+  that are new or already listening (plus a sweep every 30 seconds).
 - Disk sizes use `du` at macOS background priority, at most three at a time. The automatic rescan
   runs at most every six hours; **Rescan** runs one now.
 - The menu bar shows CPU and memory at a glance.
@@ -127,6 +133,8 @@ or closed while it is on. Every screenshot above was taken in it.
 - **Process environments are never stored.** RigWatch reads exactly two variables from its own
   processes, `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_HOST_SESSION_ID`, to link processes to a
   session. Tokens and everything else in the environment are skipped.
+- **Dev server owners are kept only while the server runs**: RigWatch's preferences hold the
+  process id, session id and session title for each running server, and drop them when it exits.
 - **Agent session files are read, never written**: Claude Code transcripts in `~/.claude/projects`,
   OpenCode's database (opened read-only), Codex's rollouts in `~/.codex/sessions`.
 - **Nothing leaves the Mac.** No network calls, no analytics, no accounts.
@@ -155,6 +163,7 @@ Sources/RigWatch/
   Agents.swift       agent detection; OpenCode and Codex session stores
   Sessions.swift     Claude Code transcripts
   Devices.swift      Android emulators (adb) and iOS simulators (simctl)
+  DevServers.swift   listening ports (libproc), framework guess, who started each server
   Worktrees.swift    git worktrees and the safe-removal check
   Demo.swift         the -demo data set
   Theme.swift        colours, panels, gauges
