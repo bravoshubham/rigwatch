@@ -57,7 +57,7 @@ Requires **macOS 14 (Sonoma) or later** on Apple silicon (Intel is untested), an
 (`xcode-select --install`).
 
 ```bash
-git clone https://github.com/OWNER/rigwatch.git
+git clone https://github.com/bravoshubham/rigwatch.git
 cd rigwatch
 ./bundle.sh
 open ~/Applications/RigWatch.app
