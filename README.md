@@ -49,9 +49,6 @@ Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups eve
 
 <p align="center">
   <img src="docs/screenshots/sessions-dark.png" width="49%" alt="Agent sessions">
-  <img src="docs/screenshots/disk-dark.png" width="49%" alt="Disk map">
-</p>
-<p align="center">
   <img src="docs/screenshots/servers-dark.png" width="49%" alt="Dev servers">
 </p>
 <p align="center">
@@ -63,7 +60,11 @@ Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups eve
   <img src="docs/screenshots/memory-dark.png" width="49%" alt="Memory">
 </p>
 <p align="center">
+  <img src="docs/screenshots/disk-dark.png" width="49%" alt="Disk map">
   <img src="docs/screenshots/overview-light.png" width="49%" alt="Overview, light theme">
+</p>
+<p align="center">
+  <img src="docs/screenshots/servers-light.png" width="49%" alt="Dev servers, light theme">
   <img src="docs/screenshots/disk-light.png" width="49%" alt="Disk, light theme">
 </p>
 
@@ -112,6 +113,29 @@ rigwatch -demo                                               # Homebrew install
 
 Demo mode fills every page with made-up sessions, devices and folders. Nothing is sampled, scanned
 or closed while it is on. Every screenshot above was taken in it.
+
+### Uninstall
+
+Quit RigWatch, then remove the app:
+
+```bash
+brew uninstall rigwatch
+```
+
+If you linked it into your Applications folder, remove the link:
+
+```bash
+rm ~/Applications/RigWatch.app
+```
+
+Remove its settings (window position, saved folder sizes, which session started each dev server):
+
+```bash
+defaults delete dev.rigwatch.RigWatch
+```
+
+Built from source instead? Skip the first two steps and delete the app with
+`rm -rf ~/Applications/RigWatch.app`. RigWatch keeps nothing else on your Mac.
 
 ## Light on the machine it watches
 
