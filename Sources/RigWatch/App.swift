@@ -1,0 +1,36 @@
+import SwiftUI
+
+@main
+struct RigWatchApp: App {
+    @ObservedObject private var m = Monitor.shared
+    @AppStorage("appearance") private var appearance = "system"
+
+    var body: some Scene {
+        Window("RigWatch", id: "main") {
+            RootView().frame(minWidth: 1080, minHeight: 680)
+                .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
+        }
+        .defaultSize(width: 1280, height: 820)
+
+        MenuBarExtra {
+            MenuView()
+        } label: {
+            Text("CPU \(Int(m.sys.cpu))% · \(Fmt.bytes(m.sys.memUsed))")
+        }
+    }
+}
+
+struct MenuView: View {
+    @ObservedObject private var m = Monitor.shared
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        let s = m.sys
+        Text("CPU \(Fmt.pct(s.cpu)) · load \(String(format: "%.1f", s.load.0))")
+        Text("Memory \(Fmt.bytes(s.memUsed)) of \(Fmt.bytes(s.memTotal)) · \(Views.pressureName(s.pressure))")
+        Text("GPU \(s.gpu)% · Swap \(Fmt.bytes(s.swapUsed))")
+        if !m.devices.isEmpty { Text("\(m.devices.filter { $0.kind != .phone }.count) emulators/simulators running") }
+        Divider()
+        Button("Open RigWatch") { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
+        Button("Quit RigWatch") { NSApp.terminate(nil) }
+    }
+}
