@@ -5,9 +5,13 @@
 <h1 align="center">RigWatch</h1>
 
 <p align="center">
-  <b>Mission control for a developer's Mac.</b><br>
-  See what your coding agents, emulators, simulators, builds and caches are doing to your machine,<br>
-  and close what you don't need, safely.
+  <b>Your Mac is crawling. Activity Monitor won't tell you why. RigWatch will.</b><br>
+  It groups every process by who started it: which agent session, which emulator, which build.<br>
+  Then it lets you close what you don't need without losing work.
+</p>
+
+<p align="center">
+  <code>brew install bravoshubham/tap/rigwatch</code>
 </p>
 
 <p align="center">
@@ -16,11 +20,16 @@
 
 ## Why
 
-A Mac running a few coding agents, an Android emulator, an iOS simulator and a Gradle daemon slows
-down, and Activity Monitor won't tell you *why*: it lists 700 processes with no idea that forty of
-them belong to one agent session, or that an emulator nobody has touched in two days is holding 6 GB.
+Run a few coding agents on a Mac for a day and this is what you find:
 
-RigWatch groups everything by **who started it** and shows it as one picture.
+- Three agent sessions, each with a tree of forty processes, and no way to tell which one is eating 12 GB.
+- An Android emulator nobody has touched since Tuesday, still holding 6 GB.
+- Four Gradle daemons and a Kotlin daemon left over from builds that finished hours ago.
+- Thirty worktrees the agents created, and no idea which are safe to delete.
+- DerivedData, simulators and Gradle caches quietly taking 200 GB of disk.
+
+Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups everything by
+**who started it**, shows it as one picture, and closes what you don't need behind a confirmation.
 
 ## What it shows
 
