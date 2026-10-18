@@ -80,8 +80,18 @@ rigwatch
 ```
 
 Homebrew builds RigWatch on your Mac from source (about 20 seconds), so macOS opens it without a
-Gatekeeper warning. Update with `brew upgrade`. To see it in your Applications folder too, run the
-`ln -sfn …` line Homebrew prints after installing.
+Gatekeeper warning. To see it in your Applications folder too, run the `ln -sfn …` line Homebrew
+prints after installing.
+
+To update:
+
+```bash
+brew update && brew upgrade rigwatch
+```
+
+`brew update` makes Homebrew check for a new RigWatch right away; on its own, `brew upgrade` may skip
+the check if Homebrew looked recently. Then quit RigWatch (menu bar item → Quit RigWatch) and open it
+again: an app that is already running keeps the old version until it restarts.
 
 ### From source
 
