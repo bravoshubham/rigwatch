@@ -58,6 +58,9 @@ final class SystemSampler {
         return s
     }
 
+    /// CPU and memory only (Mach and sysctl calls, no IOKit): the cheap check run while the window is hidden.
+    func light() -> SysSnapshot { var s = SysSnapshot(); cpu(&s); memory(&s); return s }
+
     private func cpu(_ s: inout SysSnapshot) {
         var count: natural_t = 0
         var info: processor_info_array_t?

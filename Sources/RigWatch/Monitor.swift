@@ -35,7 +35,8 @@ final class Monitor: ObservableObject {
     @Published var tab: Page = .overview
     @Published var procSearch = ""          // Processes tab filter; the Overview map sets it to jump to a process
     @Published var sys = SysSnapshot()
-    @Published var procs: [Proc] = []
+    @Published var procs: [Proc] = [] { didSet { procIndex = Dictionary(procs.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a }) } }
+    private(set) var procIndex: [Int32: Proc] = [:]
     @Published var groups: [ProcGroup] = []
     @Published var devices: [Device] = []
     @Published var sessions: [Session] = []
@@ -50,6 +51,11 @@ final class Monitor: ObservableObject {
     @Published var selfMem: UInt64 = 0
     @Published var agentOwner: [Int32: String] = [:]   // pid -> session id, for agents other than Claude Code
     @Published var top: TopKind?                         // the Top CPU / Top memory sheet, when open
+    @Published var history: [Moment] = []                // the last 15 minutes, in memory only
+    @Published var hotStreak = 0                         // samples in a row with CPU >= 70%
+    @Published var bannerDismissed = false
+    private var lastProbe = Date.distantPast
+    private var lastHiddenProcs = Date.distantPast
 
     private let q = DispatchQueue(label: "rigwatch.sample", qos: .utility, autoreleaseFrequency: .workItem)
     /// du and other minute-long scans: kept off the sampling queue so live numbers never stall behind them.
@@ -102,6 +108,9 @@ final class Monitor: ObservableObject {
     private func heartbeat(force: Bool = false) {
         tick += 1
         let visible = windowVisible
+        // Hidden: a cheap CPU/memory check every 5 s keeps the spike history going; processes are
+        // listed only while the machine is busy, so the culprits of a spike are on record.
+        if !visible, !force, !Demo.on, !running, Date().timeIntervalSince(lastProbe) >= 5, Date().timeIntervalSince(lastFull) < 55 { probe(); return }
         let interval: TimeInterval = visible ? TimeInterval(self.interval) : 60
         guard force || Date().timeIntervalSince(lastFull) >= interval, !running else { return }
         lastFull = Date()
@@ -117,6 +126,7 @@ final class Monitor: ObservableObject {
             servers = Demo.servers(tick); sessions = Self.attach(servers, to: Demo.sessions(tick))
             if worktrees.isEmpty { worktrees = Demo.worktrees() }
             selfCPU = 0.5; selfMem = 140 << 20
+            record(sys, procs, groups)
             return
         }
         running = true
@@ -130,7 +140,7 @@ final class Monitor: ObservableObject {
         q.async { [procSampler, sysSampler, devSampler, index, agents, serverScanner] in
             let s = sysSampler.sample()
             guard visible else {
-                DispatchQueue.main.async { self.sys = s; self.running = false }
+                DispatchQueue.main.async { self.sys = s; self.record(s, nil, nil); self.running = false }
                 return
             }
             let ps = procSampler.sample()
@@ -156,8 +166,60 @@ final class Monitor: ObservableObject {
                     self.devices = devs
                 }
                 self.selfCPU = own?.cpu ?? 0; self.selfMem = own?.mem ?? 0
+                self.record(s, ps, groups)
                 self.running = false
             }
+        }
+    }
+
+    private func probe() {
+        lastProbe = Date()
+        running = true
+        let listProcs = Date().timeIntervalSince(lastHiddenProcs) >= 10
+        q.async { [sysSampler, procSampler] in
+            let s = sysSampler.light()
+            let hot = s.cpu >= Moment.hotCPU || s.pressure >= 2
+            let ps = hot && listProcs ? procSampler.sample() : nil
+            let groups = ps.map(Self.group)
+            DispatchQueue.main.async {
+                if let ps, let groups { self.lastHiddenProcs = Date(); self.record(s, ps, groups) } else { self.record(s, nil, nil) }
+                self.running = false
+            }
+        }
+    }
+
+    /// Adds a sample to the 15-minute history and keeps the high-CPU streak.
+    func record(_ s: SysSnapshot, _ ps: [Proc]?, _ groups: [ProcGroup]?) {
+        hotStreak = s.cpu >= Moment.hotCPU ? hotStreak + 1 : 0
+        if hotStreak == 0 { bannerDismissed = false }
+        var mo = Moment(at: Date(), cpu: s.cpu, memUsed: s.memUsed, pressure: s.pressure)
+        if let ps, let groups {
+            mo.topCPU = culprits(ps, groups, byCPU: true)
+            mo.topMem = culprits(ps, groups, byCPU: false)
+        }
+        history.append(mo)
+        let cutoff = Date().addingTimeInterval(-Moment.window)
+        if let i = history.firstIndex(where: { $0.at >= cutoff }), i > 0 { history.removeFirst(i) }
+        if history.count > 600 { history.removeFirst(history.count - 600) }
+    }
+
+    /// The top five groups by CPU or memory, each named by its biggest process: "swift-frontend ×14".
+    func culprits(_ ps: [Proc], _ groups: [ProcGroup], byCPU: Bool) -> [Culprit] {
+        func load(_ p: Proc) -> Double { byCPU ? p.cpu : Double(p.mem) }
+        let top = groups.sorted { byCPU ? $0.cpu > $1.cpu : $0.mem > $1.mem }.prefix(5).filter { byCPU ? $0.cpu >= 1 : $0.mem > 0 }
+        return top.map { g in
+            let members = ps.filter { $0.group == g.name }
+            let index = Dictionary(ps.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
+            var byName: [String: (Double, Int)] = [:]
+            for p in members { byName[p.name, default: (0, 0)].0 += load(p); byName[p.name, default: (0, 0)].1 += 1 }
+            let lead = byName.max { $0.value.0 < $1.value.0 }
+            var bySession: [String: Double] = [:]
+            for p in members { if let id = sessionId(p, index) { bySession[id, default: 0] += load(p) } }
+            let total = members.reduce(0) { $0 + load($1) }
+            var owner = ""
+            if let (id, v) = bySession.max(by: { $0.value < $1.value }), total > 0, v / total > 0.5 { owner = "started by \(sessionTitle(id))" }
+            else if let p = members.max(by: { load($0) < load($1) }) { owner = self.owner(p) }
+            return Culprit(name: lead?.key ?? g.name, count: lead?.value.1 ?? g.count, group: g.name, cpu: g.cpu, mem: g.mem, owner: owner)
         }
     }
 

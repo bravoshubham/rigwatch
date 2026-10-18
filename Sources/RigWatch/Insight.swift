@@ -21,11 +21,44 @@ enum Fix {
     }
 }
 
+// MARK: history
+
+/// One group at one moment: "swift-frontend ×14" in Xcode / Swift, started by a session.
+struct Culprit: Hashable {
+    let name: String; let count: Int; let group: String; let cpu: Double; let mem: UInt64; let owner: String
+    var label: String { count > 1 ? "\(name) ×\(count)" : name }
+}
+
+/// One sample in the spike history. Hidden-window samples carry culprits only while the machine is busy.
+struct Moment: Identifiable {
+    static let hotCPU = 70.0, window: TimeInterval = 15 * 60
+    let id = UUID()
+    let at: Date
+    let cpu: Double
+    let memUsed: UInt64
+    let pressure: Int32
+    var topCPU: [Culprit] = []
+    var topMem: [Culprit] = []
+    var spike: Bool { cpu >= Self.hotCPU || pressure >= 2 }
+}
+
 // MARK: who started what
 
 extension Monitor {
-    /// The agent session a process belongs to: the id it inherited, or the agent tree it runs in.
-    func sessionId(_ p: Proc) -> String? { p.session ?? agentOwner[p.pid] }
+    /// The agent session a process belongs to: the id it inherited, the agent tree it runs in, or
+    /// failing those (macOS hides the environment of some processes) the nearest ancestor that has one.
+    func sessionId(_ p: Proc, _ index: [Int32: Proc]? = nil) -> String? {
+        let idx = index ?? procIndex
+        var q: Proc? = p, hops = 0
+        while let x = q, hops < 16 {
+            if let s = x.session ?? agentOwner[x.pid] { return s }
+            if let h = x.hostSession, let s = sessions.first(where: { $0.hostId == h }) { return s.id }   // a Claude app session's own process
+            if let s = sessions.first(where: { $0.pids[x.pid] != nil }) { return s.id }
+            guard x.ppid > 1 else { break }
+            q = idx[x.ppid]; hops += 1
+        }
+        return nil
+    }
 
     func sessionTitle(_ id: String) -> String { session(id)?.title ?? String(id.prefix(8)) }
 
@@ -197,5 +230,48 @@ struct TopSheet: View {
             Button { m.top = nil; m.procSearch = "\(p.pid)"; m.tab = .processes } label: { Image(systemName: "magnifyingglass") }
                 .buttonStyle(HUDButton(color: Aspect.process.color)).help("Show in Processes")
         }
+    }
+}
+
+// MARK: high-CPU banner
+
+/// Shown on Overview once CPU has stayed at 70% or more for two samples: who is using it and who started them.
+struct HotBanner: View {
+    @ObservedObject private var m = Monitor.shared
+    @Environment(\.colorScheme) private var scheme
+    let moment: Moment
+    var body: some View {
+        let hot = Color(hex: 0xFF8A3D)
+        let list = moment.topCPU.filter { $0.cpu / Fmt.cores >= 3 }.prefix(3)
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: "flame.fill").font(.system(size: 18, weight: .semibold)).foregroundStyle(hot.readable(scheme)).frame(width: 34, height: 34)
+                .background(Rectangle().fill(hot.opacity(0.14))).overlay(Rectangle().strokeBorder(hot.opacity(0.6), lineWidth: 0.8))
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("CPU \(Int(m.sys.cpu))%").font(.system(size: 16, weight: .semibold, design: .monospaced)).foregroundStyle(hot.readable(scheme))
+                    Text("busy for \(m.hotStreak) samples in a row · what is using it").hudLabel()
+                }
+                ForEach(list, id: \.self) { c in
+                    HStack(spacing: 8) {
+                        Text(Fmt.cpu(c.cpu)).font(.system(size: 12.5, weight: .bold, design: .monospaced)).monospacedDigit().frame(width: 52, alignment: .trailing)
+                        Text(c.label).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+                        Text("(" + [c.group == c.name ? nil : c.group, c.owner.isEmpty ? nil : c.owner].compactMap { $0 }.joined(separator: ", ") + ")")
+                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    }
+                }
+                if list.isEmpty { Text("Spread thin: no single group is above 3% of the machine.").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary) }
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 6) {
+                Button { m.top = .cpu } label: { Label("Top CPU", systemImage: "list.number") }.buttonStyle(HUDButton(color: hot, filled: true))
+                Button { m.bannerDismissed = true } label: { Label("Dismiss", systemImage: "xmark") }.buttonStyle(HUDButton(color: Aspect.process.color))
+                    .help("Hide until CPU drops below 70% and climbs again")
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Rectangle().fill(hot.opacity(scheme == .dark ? 0.08 : 0.1)))
+        .overlay(Rectangle().strokeBorder(hot.opacity(0.7), lineWidth: 0.9))
+        .overlay(Brackets().stroke(hot.readable(scheme), lineWidth: 1.5))
     }
 }

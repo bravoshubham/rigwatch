@@ -228,6 +228,7 @@ struct OverviewView: View {
         let emu = m.groups.first { $0.name == "Android emulators" }, sim = m.groups.first { $0.name == "iOS simulators" }
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                if m.hotStreak >= 2 && !m.bannerDismissed, let mo = m.history.last(where: { !$0.topCPU.isEmpty }) { HotBanner(moment: mo) }
                 SectionTitle(title: "What is using the machine", aspect: .gpu)
                 ProcessDie().frame(height: 450)
 
