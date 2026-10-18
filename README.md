@@ -6,8 +6,8 @@
 
 <p align="center">
   <b>Your Mac is crawling. Activity Monitor won't tell you why. RigWatch will.</b><br>
-  It groups every process by who started it: which agent session, which emulator, which build.<br>
-  Then it lets you close what you don't need without losing work.
+  It groups every process by who started it: agent sessions, dev servers, emulators, builds.<br>
+  Then it cleans up what you don't need, including the worktrees your agents left behind, without losing work.
 </p>
 
 <p align="center">
@@ -23,10 +23,13 @@
 Run a few coding agents on a Mac for a day and this is what you find:
 
 - Three agent sessions, each with a tree of forty processes, and no way to tell which one is eating 12 GB.
-- An Android emulator nobody has touched since Tuesday, still holding 6 GB.
-- Four Gradle daemons and a Kotlin daemon left over from builds that finished hours ago.
-- Thirty worktrees the agents created, and no idea which are safe to delete.
-- DerivedData, simulators and Gradle caches quietly taking 200 GB of disk.
+- Dev servers, test watchers and MCP servers those agents started, still running long after you moved on.
+- Thirty worktrees the agents created, each with its own `node_modules` or build folder, and no idea
+  which ones are safe to delete.
+- An emulator or simulator nobody has touched since Tuesday, still holding 6 GB.
+- Docker, package caches, DerivedData and Gradle quietly taking 200 GB of disk.
+
+Web, backend or mobile, it is the same story.
 
 Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups everything by
 **who started it**, shows it as one picture, and closes what you don't need behind a confirmation.
@@ -36,11 +39,11 @@ Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups eve
 | Page | What you get |
 | --- | --- |
 | **Overview** | A chip-die map of the machine, sized by memory or CPU. Click any block to see what's inside it. Live CPU, memory, GPU, disk, network and chip temperature. |
-| **Agent Sessions** | Every coding agent running, with its CPU, memory, processes, devices and worktrees. Claude Code, OpenCode and Codex also show the session title and last prompt, and can be resumed. Cursor, Windsurf, T3 Code, Gemini CLI, Aider, Goose and Amp are recognised from their processes. |
+| **Agent Sessions** | Every coding agent running, with its CPU, memory, devices, worktrees and every process it started: dev servers, test runners, MCP servers, builds. Claude Code, OpenCode and Codex also show the session title and last prompt, and can be resumed. Cursor, Windsurf, T3 Code, Gemini CLI, Aider, Goose and Amp are recognised from their processes. |
 | **Emulators & Simulators** | Each Android emulator and iOS simulator: what it's showing, which session launched it, the last command a session ran on it, a live screen, and a graceful shut-down. |
 | **Processes** | Grouped by app or tool, with CPU on one scale (100% = the whole machine) and quit or force-quit behind a confirmation. |
 | **Memory** | Where the RAM went: apps, wired, compressed, file cache, swap and pressure. |
-| **Worktrees** | Every `git worktree` under your home folders, which session made it, whether anything is using it, and a remove that refuses to lose uncommitted or unpushed work. |
+| **Worktrees** | Every `git worktree` under your home folders, which session made it, how much disk it takes, whether anything is using it, and a remove that refuses to lose uncommitted or unpushed work. |
 | **Disk** | The whole drive as a chip-die map of folders. Click into any folder; right-click to show it in Finder. |
 
 <p align="center">
