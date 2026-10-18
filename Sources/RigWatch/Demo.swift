@@ -75,6 +75,9 @@ enum Demo {
         P(group: "Gradle", name: "java", path: "/Library/Java/JavaVirtualMachines/jdk-21/Contents/Home/bin/java", n: 2, cpu: 61, mem: 4_700 * mb, root: false),
         P(group: "Kotlin daemon", name: "java", path: "/Library/Java/JavaVirtualMachines/jdk-21/Contents/Home/bin/java", n: 1, cpu: 12, mem: 2_100 * mb, root: false),
         P(group: "Xcode / Swift", name: "Xcode", path: "/Applications/Xcode.app/Contents/MacOS/Xcode", n: 7, cpu: 18, mem: 3_900 * mb, root: false),
+        // A Swift build an agent session started: the CPU spike the banner and the timeline name.
+        P(group: "Xcode / Swift", name: "swift-frontend", path: "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift-frontend", n: 14, cpu: 1_000, mem: 3_600 * mb, root: false),
+        P(group: "Local models", name: "ollama", path: "/Applications/Ollama.app/Contents/Resources/ollama", n: 2, cpu: 0.6, mem: 9_400 * mb, root: false),
         P(group: "iOS simulators", name: "launchd_sim", path: "/Library/Developer/CoreSimulator/Volumes/iOS_22A/launchd_sim", n: 46, cpu: 21, mem: 2_800 * mb, root: false),
         P(group: "Claude Code sessions", name: "claude", path: "/usr/local/bin/claude", n: 4, cpu: 8, mem: 2_300 * mb, root: false),
         P(group: "OpenCode", name: "opencode", path: "/opt/homebrew/bin/opencode", n: 3, cpu: 4, mem: 640 * mb, root: false),
@@ -112,6 +115,7 @@ enum Demo {
                              diskRead: 0, diskWrite: 0, group: g.group, session: nil, hostSession: nil, args: [])
                 if g.group == "Gradle" || g.group == "Android emulators" { p.diskWrite = wob(2_400_000, tick, gi + k, 0.6); p.diskRead = wob(900_000, tick, gi + k + 3, 0.6) }
                 if g.group == "Xcode / Swift" && k == 0 { p.diskRead = wob(1_200_000, tick, 5, 0.5) }
+                if g.name == "swift-frontend" { p.session = sessionSeed[2].id; p.mem = UInt64(Double(g.mem) / Double(g.n)); p.cpu = wob(g.cpu / Double(g.n), tick, gi * 31 + k, 0.08) }
                 if g.group == "Claude Code sessions", let c = [0, 3, 4, 5].dropFirst(0).enumerated().first(where: { $0.offset == k })?.element { p.session = sessionSeed[c].id }
                 out.append(p)
             }
@@ -143,12 +147,12 @@ enum Demo {
         s.memTotal = 64 * gb
         let app = procs.filter { $0.uid != 0 }.reduce(UInt64(0)) { $0 + $1.mem }
         s.memApp = min(app, s.memTotal / 2)
-        s.memWired = 7 * gb; s.memCompressed = 2 * gb + 300 * mb
+        s.memWired = 12 * gb; s.memCompressed = 2 * gb + 300 * mb
         s.memCached = s.memTotal / 6; s.memPurgeable = 1 * gb + 200 * mb
         s.memFree = s.memTotal - min(s.memTotal, s.memUsed + s.memCached)
         s.pressure = 1
         s.swapUsed = 0; s.swapTotal = 2 * gb
-        s.gpu = Int(wob(24, tick, 7, 0.5)); s.gpuMem = 1_400 * mb; s.gpuModel = real.gpuModel.isEmpty ? "Apple M4 Max" : real.gpuModel
+        s.gpu = Int(wob(24, tick, 7, 0.5)); s.gpuMem = 9_800 * mb; s.gpuModel = real.gpuModel.isEmpty ? "Apple M4 Max" : real.gpuModel   // GPU memory: mostly the local model's weights
         s.diskRead = wob(3_800_000, tick, 11, 0.6); s.diskWrite = wob(6_200_000, tick, 13, 0.6)
         s.netIn = wob(1_900_000, tick, 17, 0.7); s.netOut = wob(320_000, tick, 19, 0.7)
         s.volumes = [Volume(name: "Macintosh HD", path: "/", total: 1_000_000_000_000, free: 212_000_000_000)]
@@ -171,9 +175,55 @@ enum Demo {
         b.launchedBy = sessionSeed[2].id; b.foreground = "AcmeShop, OrderWidgetExtension"
         b.recentUsers = [sessionSeed[2].id: ago(90)]
         b.lastAction = (sessionSeed[2].id, "xcrun simctl launch booted com.acme.shop", ago(90))
+        // Left running from yesterday; nothing has used it since.
+        var t = Device(id: "emulator-5556", kind: .emulator, name: "Pixel_Tablet_API_34", detail: "sdk_gtablet_arm64", state: "device", pid: 20_009)
+        t.cpu = wob(9, tick, 3); t.mem = 4_300 * mb; t.started = ago(26 * 3600); t.screen = "Asleep"; t.guestLoad = "0.31 0.28 0.30"
         var c = Device(id: "R5CT1234ABC", kind: .phone, name: "Galaxy S24", detail: "SM_S921B", state: "device")
         c.foreground = "com.acme.shop/com.acme.shop.HomeActivity"; c.screen = "Asleep"
-        return [a, b, c]
+        return [a, b, t, c]
+    }
+
+    /// Agent sessions other than Claude Code own their processes by tree, not by environment.
+    static func agentOwner(_ ps: [Proc]) -> [Int32: String] {
+        var o: [Int32: String] = [:]
+        for p in ps {
+            switch p.group {
+            case "Cursor": o[p.pid] = "pid:20412"
+            case "OpenCode": o[p.pid] = sessionSeed[1].id
+            case "Codex": o[p.pid] = sessionSeed[2].id
+            default: break
+            }
+        }
+        return o
+    }
+
+    // MARK: spike history
+
+    /// Fifteen minutes of samples: a Gradle build 11 minutes ago, memory pressure at 7, the Swift build now.
+    static func history() -> [Moment] {
+        let gradle = Culprit(name: "java", count: 2, group: "Gradle", cpu: 1_310, mem: 6_900 * mb, owner: "started by \(sessionSeed[1].title)")
+        let swift = Culprit(name: "swift-frontend", count: 14, group: "Xcode / Swift", cpu: 1_020, mem: 3_600 * mb, owner: "started by \(sessionSeed[2].title)")
+        let emu = Culprit(name: "qemu-system-aarch64", count: 1, group: "Android emulators", cpu: 118, mem: 6_100 * mb, owner: "Android emulator")
+        let mds = Culprit(name: "mds_stores", count: 1, group: "macOS services", cpu: 180, mem: 9_800 * mb, owner: "macOS")
+        let chrome = Culprit(name: "Google Chrome Helper", count: 31, group: "Google Chrome", cpu: 14, mem: 4_200 * mb, owner: "app Google Chrome")
+        let model = Culprit(name: "ollama", count: 2, group: "Local models", cpu: 0.6, mem: 9_400 * mb, owner: "started by you")
+        var out: [Moment] = []
+        for i in stride(from: 900, to: 0, by: -5) {
+            let t = Double(i)
+            var cpu = 18 + 6 * sin(t / 23)
+            var pressure: Int32 = 1
+            if (640...690).contains(t) { cpu = 78 + 10 * sin(t / 7) }           // Gradle build
+            if (400...440).contains(t) { pressure = 2; cpu = 34 }                 // memory pressure while the build cache was written
+            if (300...330).contains(t) { cpu = 58 + 8 * sin(t / 5) }
+            if t <= 25 { cpu = 84 + 4 * sin(t / 3) }                             // the Swift build running now
+            var mo = Moment(at: now.addingTimeInterval(-t), cpu: cpu, memUsed: 41 * gb + UInt64(t) * 4 * mb, pressure: pressure)
+            if cpu >= Moment.hotCPU || pressure >= 2 || i % 30 == 0 {
+                mo.topCPU = (640...690).contains(t) ? [gradle, emu, mds, chrome] : t <= 25 ? [swift, emu, mds, chrome] : [emu, mds, chrome]
+                mo.topMem = [model, mds, gradle, emu, chrome]
+            }
+            out.append(mo)
+        }
+        return out
     }
 
     // MARK: worktrees

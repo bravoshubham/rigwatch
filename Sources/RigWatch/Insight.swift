@@ -120,7 +120,9 @@ extension Monitor {
         return NSWorkspace.shared.runningApplications.first { $0.activationPolicy == .regular && $0.bundleURL?.deletingPathExtension().lastPathComponent == name }
     }
 
-    func appRunning(_ name: String) -> Bool { Demo.on ? !Self.keepApps.contains(name) : runningApp(name) != nil }
+    func appRunning(_ name: String) -> Bool {
+        Demo.on ? !Self.keepApps.contains(name) && procs.contains { $0.group == name && $0.path.contains("/\(name).app/") } : runningApp(name) != nil
+    }
 
     /// Quit app = what ⌘Q does: the app is asked to quit and may ask to save first.
     func confirmQuitApp(_ name: String) {
@@ -293,11 +295,12 @@ struct SpikeTimeline: View {
     var body: some View {
         let h = m.history
         let spikes = h.filter(\.spike)
+        let episodes = zip(h, [nil] + h.map(Optional.some)).filter { $0.spike && !($1?.spike ?? false) }.count   // runs of spike samples
         let sel = h.first { $0.id == picked } ?? spikes.last { !$0.topCPU.isEmpty } ?? h.last
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                SectionTitle(title: "Last 15 minutes", aspect: .cpu, count: spikes.count)
-                Text(spikes.isEmpty ? "no spikes" : "spikes: CPU ≥ 70% or memory pressure up").hudLabel().fixedSize()
+                SectionTitle(title: "Last 15 minutes", aspect: .cpu, count: episodes)
+                Text(spikes.isEmpty ? "no spikes" : "\(episodes == 1 ? "spike" : "spikes"): CPU ≥ 70% or memory pressure up").hudLabel().fixedSize()
             }
             Panel(aspect: .cpu, padding: 12) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -423,8 +426,13 @@ extension Monitor {
             out.append(.init(id: "srv:" + d.id, kind: d.orphaned ? "Orphaned dev server" : "Dev server, session ended", name: d.label,
                              detail: d.cwd.map { "in " + Views.tilde($0) } ?? d.name, bytes: d.mem, aspect: .server, action: "Stop") { [weak self] in self?.confirmStop(d) })
         }
+        if let g = groups.first(where: { $0.name == "Local models" }), g.mem >= 1 << 30,
+           let p = procs.filter({ $0.group == g.name }).max(by: { $0.mem < $1.mem }), Safety.processBlock(p) == nil {
+            out.append(.init(id: "llm", kind: "Local model", name: p.name, detail: "holds its model in GPU memory while loaded · unloading it in its own app works too",
+                             bytes: g.mem, aspect: .gpu, action: "Quit") { [weak self] in self?.confirmQuit(p) })
+        }
         let live = Set(sessions.filter(\.live).map(\.id))
-        for g in groups where g.mem >= 1 << 30 && appRunning(g.name) {
+        for g in groups where g.mem >= 2 << 30 && g.name != "Local models" && appRunning(g.name) {
             let members = procs.filter { $0.group == g.name }
             // Apps only, and never one an agent session is running in.
             guard members.contains(where: { $0.path.contains(".app/") }), !members.contains(where: { sessionId($0).map(live.contains) ?? false }) else { continue }
@@ -448,11 +456,11 @@ struct FreeList: View {
                 if total > 0 { Text("you could free ~\(Fmt.bytes(total))").font(.system(size: 11, weight: .semibold, design: .monospaced)).foregroundStyle(Color(hex: 0x3DDC97).readable(scheme)).fixedSize() }
             }
             if items.isEmpty {
-                Text("Nothing obvious: no idle emulators, dormant sessions, abandoned dev servers or apps over 1 GB.").hudLabel().padding(.leading, 14)
+                Text("Nothing obvious: no idle emulators, dormant sessions, abandoned dev servers, loaded local models or apps over 2 GB.").hudLabel().padding(.leading, 14)
             } else {
                 Panel(aspect: .memory, padding: 12) {
                     VStack(alignment: .leading, spacing: 9) {
-                        ForEach(items) { f in
+                        ForEach(items.prefix(8)) { f in
                             HStack(spacing: 10) {
                                 Image(systemName: f.aspect.icon).font(.system(size: 11)).foregroundStyle(f.aspect.color.readable(scheme)).frame(width: 16)
                                 Text(Fmt.bytes(f.bytes)).font(.system(size: 12, weight: .semibold, design: .monospaced)).monospacedDigit().frame(width: 80, alignment: .trailing)
@@ -463,6 +471,7 @@ struct FreeList: View {
                                 Button(action: f.run) { Text(f.action) }.buttonStyle(HUDButton(color: f.action == "Open" ? f.aspect.color : Color(hex: 0xFF4D5E)))
                             }
                         }
+                        if items.count > 8 { Text("+ \(items.count - 8) more, \(Fmt.bytes(items.dropFirst(8).reduce(UInt64(0)) { $0 + $1.bytes })) in all").hudLabel().padding(.leading, 26) }
                         Text("Sizes are what each one uses now; memory shared between processes is counted in each, so the total is approximate. Every action asks first.")
                             .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
                     }

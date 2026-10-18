@@ -51,7 +51,9 @@ final class Monitor: ObservableObject {
     @Published var selfMem: UInt64 = 0
     @Published var agentOwner: [Int32: String] = [:]   // pid -> session id, for agents other than Claude Code
     @Published var top: TopKind?                         // the Top CPU / Top memory sheet, when open
-    @Published var history: [Moment] = []                // the last 15 minutes, in memory only
+    /// The last 15 minutes, in memory only. Not @Published: a hidden-window sample would otherwise wake
+    /// every view (the menu bar label too); views read it when the next visible sample redraws them.
+    private(set) var history: [Moment] = []
     @Published var hotStreak = 0                         // samples in a row with CPU >= 70%
     @Published var bannerDismissed = false
     private var lastProbe = Date.distantPast
@@ -125,7 +127,8 @@ final class Monitor: ObservableObject {
         if Demo.on {
             let ps = Demo.procs(tick)
             sys = Demo.sys(tick, procs: ps, real: sys.memTotal > 0 ? sys : sysSampler.sample())
-            procs = ps; groups = Demo.groups(ps); devices = Demo.devices(tick)
+            procs = ps; groups = Demo.groups(ps); devices = Demo.devices(tick); agentOwner = Demo.agentOwner(ps)
+            if history.isEmpty { history = Demo.history() }
             servers = Demo.servers(tick); sessions = Self.attach(servers, to: Demo.sessions(tick))
             if worktrees.isEmpty { worktrees = Demo.worktrees() }
             selfCPU = 0.5; selfMem = 140 << 20
@@ -196,8 +199,9 @@ final class Monitor: ObservableObject {
 
     /// Adds a sample to the 15-minute history and keeps the high-CPU streak.
     func record(_ s: SysSnapshot, _ ps: [Proc]?, _ groups: [ProcGroup]?) {
-        hotStreak = s.cpu >= Moment.hotCPU ? hotStreak + 1 : 0
-        if hotStreak == 0 { bannerDismissed = false }
+        let streak = s.cpu >= Moment.hotCPU ? hotStreak + 1 : 0
+        if streak != hotStreak { hotStreak = streak }   // assigning a @Published value redraws even when unchanged
+        if streak == 0 && bannerDismissed { bannerDismissed = false }
         var mo = Moment(at: Date(), cpu: s.cpu, memUsed: s.memUsed, pressure: s.pressure)
         if let ps, let groups {
             mo.topCPU = culprits(ps, groups, byCPU: true)
