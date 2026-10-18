@@ -40,12 +40,14 @@ Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups eve
 
 | Page | What you get |
 | --- | --- |
-| **Overview** | A chip-die map of the machine, sized by memory or CPU. Click any block to see what's inside it. Live CPU, memory, GPU load and GPU memory, disk, network and chip temperature, so a local model's load is visible next to everything else. |
+| **Overview** | A chip-die map of what is using the machine, sized by memory or CPU; what is still available is a thin bar under it. Click any block to see what's inside it, with the biggest processes listed and explained. Live CPU, memory, GPU load and GPU memory, disk, network and chip temperature, so a local model's load is visible next to everything else. |
+| **Top CPU and memory** | Click the CPU or memory gauge (or the top bar) for what is using it right now: each group's biggest processes, who started them (agent session, dev server, emulator, app, macOS) and one action for each: Quit session, Stop, Shut down, Quit app or Quit. macOS's own processes get a plain-words note instead (kernel_task, WindowServer, Spotlight's mds_stores, photoanalysisd, iCloud's bird and 40 more): what it is, why it is busy, and what to do, often nothing. |
+| **When CPU spikes** | CPU at 70% or more for two samples in a row puts a banner on Overview naming the top culprits, their share and who started them, e.g. `swift-frontend ×14 (started by <session>) 56%`. A timeline keeps the last 15 minutes in memory; click any bar to see what was on top at that moment, including spikes that happened while the window was closed. |
 | **Agent Sessions** | Every coding agent running, with its CPU, memory, devices, worktrees and every process it started: dev servers, test runners, MCP servers, builds. Claude Code, OpenCode and Codex also show the session title and last prompt, and can be resumed. Cursor, Windsurf, T3 Code, Gemini CLI, Aider, Goose and Amp are recognised from their processes. |
 | **Dev Servers** | Every local server you started, by the port it listens on: a framework guess (Vite, Next.js, Storybook, Rails, Django, uvicorn and more), project folder, uptime, CPU and memory, and which agent session started it. That link is remembered, so a server left running after its session ended still says who started it. Open it in the browser, or stop it behind a confirmation. |
 | **Emulators & Simulators** | Each Android emulator and iOS simulator: what it's showing, which session launched it, the last command a session ran on it, a live screen, and a graceful shut-down. |
 | **Processes** | Grouped by app or tool, with CPU on one scale (100% = the whole machine) and quit or force-quit behind a confirmation. |
-| **Memory** | Where the RAM went: apps, wired, compressed, file cache, swap and pressure. |
+| **Memory** | Where the RAM went: apps, wired, compressed, file cache, swap and pressure, and **what you can free**: idle emulators and simulators, dormant agent sessions, abandoned dev servers, a loaded local model and big apps, each with its size and one button, adding up to "you could free ~X GB". GPU memory (a local model's weights) is counted once, in the process that holds it, not again as Kernel & drivers. |
 | **Worktrees** | Every `git worktree` under your home folders, which session made it, how much disk it takes, whether anything is using it, and a remove that refuses to lose uncommitted or unpushed work. |
 | **Disk** | The whole drive as a chip-die map of folders. Click into any folder; right-click to show it in Finder. |
 
@@ -152,8 +154,11 @@ nothing else on your Mac.
 
 ## Light on the machine it watches
 
-- Samples every 5 seconds while the window is open (3, 5 or 10 s in the sidebar) and once a minute
-  when it is hidden. Typically 0.1–2% of one core and 150–250 MB.
+- Samples every 5 seconds while the window is open (3, 5 or 10 s in the sidebar). While it is hidden,
+  a CPU and memory check every 5 seconds (Mach calls only) keeps the spike history going; processes
+  are listed only while CPU is at 70% or more or memory pressure is up, at most every 10 seconds, and
+  everything else is sampled once a minute. Measured on an M5 Max: about 2.4% of one core with
+  Overview open at 3 s, 0.25% hidden, 120–220 MB.
 - Machine-wide numbers come from Mach, sysctl and IOKit directly, with no helper processes.
 - Listening ports come from libproc, not `lsof`, at most every 3 seconds and only for processes
   that are new or already listening (plus a sweep every 30 seconds).
@@ -165,6 +170,7 @@ nothing else on your Mac.
 
 - **Nothing is closed without asking.** Every quit, shut-down and removal shows what will happen
   and who is using it first. macOS's own processes and other users' processes are never offered.
+  Quit app asks the app to quit the way ⌘Q does, so it can ask to save first.
 - **Quit session ends a session's own agent process**: on a live session card it sends SIGTERM to
   that session's terminal `claude` (or other agent) process after saying which pid it is and the
   command that resumes it. Sessions in the Claude desktop app are left to the app (archive them there).
@@ -210,6 +216,8 @@ Sources/RigWatch/
   Demo.swift         the -demo data set
   Theme.swift        colours, panels, gauges
   Views.swift        every page, and the chip-die treemap
+  Insight.swift      Top CPU/memory, who started what, the spike banner and timeline, what you can free
+  Explain.swift      plain-words notes for common macOS processes
 Assets/make-icon.swift   draws Assets/AppIcon.png
 ```
 
