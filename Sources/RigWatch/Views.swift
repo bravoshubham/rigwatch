@@ -290,14 +290,15 @@ struct OverviewView: View {
 
 /// The machine as a chip: each block is a process group, sized by memory (or CPU), lit by its CPU load.
 /// Click a block to see inside it: a group opens into its processes, "smaller items" into what it holds,
-/// free memory into its parts. A process opens in the Processes tab.
+/// A process opens in the Processes tab. Only what is using memory is on the map: what is still
+/// available (free, file cache, purgeable) is the bar under it.
 struct ProcessDie: View {
     @ObservedObject private var m = Monitor.shared
     @Environment(\.colorScheme) private var scheme
     @State private var byCPU = false
     @State private var hover: String?
     // -drill <group> opens the die inside that group (used to capture screenshots).
-    @State private var path: [String] = CommandLine.arguments.firstIndex(of: "-drill").map { ["g:" + CommandLine.arguments[$0 + 1]] } ?? []   // "g:<group>" · "groups:<names>" · "procs:<pids>" · "free"
+    @State private var path: [String] = CommandLine.arguments.firstIndex(of: "-drill").map { ["g:" + CommandLine.arguments[$0 + 1]] } ?? []   // "g:<group>" · "groups:<names>" · "procs:<pids>"
     static let sep = "\u{1}"
 
     func amount(_ cpu: Double, _ mem: UInt64) -> Int64 { Int64(byCPU ? cpu * 1000 : Double(mem)) }
@@ -317,13 +318,6 @@ struct ProcessDie: View {
     func level() -> (blocks: [StorageDie.Block], title: String) {
         let s = m.sys
         let key = path.last ?? ""
-        if key == "free" {
-            let cache = s.memCached - min(s.memCached, s.memPurgeable)
-            return ([.init(id: "f:free", label: "Free", bytes: Int64(s.memFree), color: Color(hex: 0x3DDC97), path: nil, kind: 0, value: Fmt.bytes(s.memFree), caption: "unused right now"),
-                     .init(id: "f:cache", label: "File cache", bytes: Int64(cache), color: Aspect.disk.color, path: nil, kind: 0, value: Fmt.bytes(cache), caption: "recently read files, dropped when apps need room"),
-                     .init(id: "f:purge", label: "Purgeable", bytes: Int64(s.memPurgeable), color: Color(hex: 0xA78BFA), path: nil, kind: 0, value: Fmt.bytes(s.memPurgeable), caption: "app caches macOS may discard")]
-                        .filter { $0.bytes > 0 }, "Free + file cache")
-        }
         if key.hasPrefix("g:") {
             let name = String(key.dropFirst(2))
             return (m.procs.filter { $0.group == name }.map(procBlock).filter { $0.bytes > 0 }.sorted { $0.bytes > $1.bytes }, name)
@@ -340,13 +334,11 @@ struct ProcessDie: View {
         var b = m.groups.map(groupBlock).filter { $0.bytes > 0 }.sorted { $0.bytes > $1.bytes }
         if !byCPU {
             b.append(.init(id: "wired", label: "Kernel & drivers", bytes: Int64(s.memWired), color: Color(hex: 0xFFB020), path: nil, kind: 1, value: Fmt.bytes(s.memWired), caption: "wired: can't be paged out"))
-            b.append(.init(id: "free", label: "Free + file cache", bytes: Int64(s.memFree + s.memCached), color: Color(hex: 0x3DDC97), path: nil, kind: 2, value: Fmt.bytes(s.memFree + s.memCached), caption: "available to apps"))
         }
         return (b, "")
     }
 
     func title(_ key: String) -> String {
-        if key == "free" { return "Free + file cache" }
         if key.hasPrefix("g:") { return String(key.dropFirst(2)) }
         let n = key.split(separator: ":", maxSplits: 1).last.map { $0.components(separatedBy: Self.sep).count } ?? 0
         return "\(n) smaller items"
@@ -360,7 +352,6 @@ struct ProcessDie: View {
             let rest = all.filter { $0.kind == 0 && !shownIds.contains($0.id) }.map { String($0.id.dropFirst(2)) }
             let groupsLevel = key.isEmpty || key.hasPrefix("groups:")
             path.append((groupsLevel ? "groups:" : "procs:") + rest.joined(separator: Self.sep))
-        case "free": path.append("free")
         case "wired": m.toast = "Kernel & drivers (wired memory) can't be broken down: macOS doesn't show apps what's inside it."
         default:
             if blk.id.hasPrefix("g:") { path.append(blk.id) }
@@ -382,8 +373,8 @@ struct ProcessDie: View {
                 Text(byCPU ? "sized by CPU · 100% = whole machine (\(s.cores.count) cores)" : "sized by memory · \(Fmt.bytes(s.memUsed)) of \(Fmt.bytes(s.memTotal)) used").hudLabel().lineLimit(1).padding(.leading, 6)
                 Spacer(minLength: 8)
                 HStack(spacing: 0) {
-                    Button("Memory") { byCPU = false; if path.last == "free" { path.removeLast() } }.buttonStyle(HUDButton(color: Aspect.memory.color, filled: !byCPU))
-                    Button("CPU") { byCPU = true; if path.last == "free" { path.removeLast() } }.buttonStyle(HUDButton(color: Aspect.cpu.color, filled: byCPU))
+                    Button("Memory") { byCPU = false }.buttonStyle(HUDButton(color: Aspect.memory.color, filled: !byCPU))
+                    Button("CPU") { byCPU = true }.buttonStyle(HUDButton(color: Aspect.cpu.color, filled: byCPU))
                 }
             }
             GeometryReader { g in
@@ -404,6 +395,7 @@ struct ProcessDie: View {
                 }
             }
             .frame(height: 380)
+            if !byCPU && path.isEmpty { AvailableBar() }
             // Inside a group: its biggest processes as a list, explained, since most fold into "smaller items".
             if path.last?.hasPrefix("g:") == true || path.last?.hasPrefix("procs:") == true {
                 let list = all.compactMap { b in m.procs.first { "p:\($0.pid)" == b.id }.map { (b, $0) } }.prefix(6)
@@ -430,6 +422,38 @@ struct ProcessDie: View {
                  ? "Click a process to open it in Processes. Hover one to see what it is."
                  : "Click a block to see what's inside it.").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
         }
+    }
+}
+
+/// What is still available to apps, as a thin bar beside what is used: free, file cache and purgeable
+/// app caches, which macOS hands back as soon as something needs the room.
+struct AvailableBar: View {
+    @ObservedObject private var m = Monitor.shared
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        let s = m.sys
+        let cache = s.memCached - min(s.memCached, s.memPurgeable)
+        let parts: [(String, UInt64, Color)] = [("used", s.memUsed, Aspect.memory.color), ("file cache", cache, Aspect.disk.color),
+                                                ("purgeable", s.memPurgeable, Color(hex: 0xA78BFA)), ("free", s.memFree, Color(hex: 0x3DDC97))]
+        let total = Double(max(1, parts.reduce(UInt64(0)) { $0 + $1.1 }))
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 10) {
+                Text("Available \(Fmt.bytes(s.memFree + s.memCached))").font(.system(size: 11, weight: .semibold, design: .monospaced)).foregroundStyle(Color(hex: 0x3DDC97).readable(scheme))
+                ForEach(parts.dropFirst(), id: \.0) { p in
+                    HStack(spacing: 4) { Rectangle().fill(p.2).frame(width: 7, height: 7); Text("\(p.0) \(Fmt.bytes(p.1))").hudLabel() }
+                }
+                Spacer()
+                Text("not on the map: macOS gives it to apps as soon as they need it").hudLabel().lineLimit(1)
+            }
+            GeometryReader { g in
+                HStack(spacing: 1) {
+                    ForEach(parts, id: \.0) { p in
+                        Rectangle().fill(p.2.opacity(p.0 == "used" ? 0.35 : 0.85)).frame(width: max(0, CGFloat(Double(p.1) / total) * (g.size.width - 3)))
+                    }
+                }
+            }.frame(height: 5)
+        }
+        .help("Used \(Fmt.bytes(s.memUsed)) · file cache \(Fmt.bytes(cache)) · purgeable \(Fmt.bytes(s.memPurgeable)) · free \(Fmt.bytes(s.memFree))")
     }
 }
 
