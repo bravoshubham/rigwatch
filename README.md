@@ -112,8 +112,10 @@ temperature also comes from a private Apple interface, which App Review does not
 
 ## Permissions
 
-None are required. Without **Full Disk Access**, a few protected folders (Mail, Safari, other
-users') can't be measured and are counted in the "System & protected" block instead.
+None are required, and RigWatch never triggers a macOS privacy prompt. The Disk map does not open
+folders macOS guards: Desktop, Documents, Downloads, Music, Movies, Pictures, the Photos library,
+iCloud Drive and other cloud drives, and Apple's own app data. Those, plus anything else macOS
+won't let it read (Mail, Safari, other users'), are counted in the "System & protected" block.
 
 ## Building and hacking
 
