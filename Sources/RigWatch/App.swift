@@ -2,8 +2,13 @@ import SwiftUI
 
 @main
 struct RigWatchApp: App {
-    @ObservedObject private var m = Monitor.shared
+    @ObservedObject private var m: Monitor
     @AppStorage("appearance") private var appearance = "system"
+
+    init() {
+        AppCopy.sync()   // may hand over to the ~/Applications copy and exit before anything starts
+        m = Monitor.shared
+    }
 
     var body: some Scene {
         Window("RigWatch", id: "main") {

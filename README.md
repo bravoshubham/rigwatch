@@ -80,8 +80,8 @@ rigwatch
 ```
 
 Homebrew builds RigWatch on your Mac from source (about 20 seconds), so macOS opens it without a
-Gatekeeper warning. To see it in your Applications folder too, run the `ln -sfn …` line Homebrew
-prints after installing.
+Gatekeeper warning. The first time you run `rigwatch`, it puts a copy of itself in
+`~/Applications`, so Spotlight, Launchpad and Finder find it from then on.
 
 To update:
 
@@ -91,7 +91,8 @@ brew update && brew upgrade rigwatch
 
 `brew update` makes Homebrew check for a new RigWatch right away; on its own, `brew upgrade` may skip
 the check if Homebrew looked recently. Then quit RigWatch (menu bar item → Quit RigWatch) and open it
-again: an app that is already running keeps the old version until it restarts.
+again, from Spotlight or with `rigwatch`: it notices the new build, updates the copy in
+`~/Applications` and restarts on the new version.
 
 ### From source
 
@@ -132,10 +133,10 @@ Quit RigWatch, then remove the app:
 brew uninstall rigwatch
 ```
 
-If you linked it into your Applications folder, remove the link:
+Remove the copy it keeps in your Applications folder:
 
 ```bash
-rm ~/Applications/RigWatch.app
+rm -rf ~/Applications/RigWatch.app
 ```
 
 Remove its settings (window position, saved folder sizes, which session started each dev server):
@@ -144,8 +145,8 @@ Remove its settings (window position, saved folder sizes, which session started 
 defaults delete dev.rigwatch.RigWatch
 ```
 
-Built from source instead? Skip the first two steps and delete the app with
-`rm -rf ~/Applications/RigWatch.app`. RigWatch keeps nothing else on your Mac.
+Built from source instead? Skip `brew uninstall`; the other two steps are the same. RigWatch keeps
+nothing else on your Mac.
 
 ## Light on the machine it watches
 
