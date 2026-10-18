@@ -48,6 +48,8 @@ final class Monitor: ObservableObject {
     @Published var busy: Set<String> = []
     @Published var selfCPU = 0.0
     @Published var selfMem: UInt64 = 0
+    @Published var agentOwner: [Int32: String] = [:]   // pid -> session id, for agents other than Claude Code
+    @Published var top: TopKind?                         // the Top CPU / Top memory sheet, when open
 
     private let q = DispatchQueue(label: "rigwatch.sample", qos: .utility, autoreleaseFrequency: .workItem)
     /// du and other minute-long scans: kept off the sampling queue so live numbers never stall behind them.
@@ -69,6 +71,7 @@ final class Monitor: ObservableObject {
         if let i = CommandLine.arguments.firstIndex(of: "-page"), i + 1 < CommandLine.arguments.count,
            let p = Page.allCases.first(where: { "\($0)" == CommandLine.arguments[i + 1] }) {
             tab = p
+            if let k = CommandLine.arguments.firstIndex(of: "-top"), k + 1 < CommandLine.arguments.count { top = TopKind(rawValue: CommandLine.arguments[k + 1]) }
             // Opened on a given page (used to capture screenshots): bring the window to the main display.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.windows.first { $0.canBecomeMain }?.center() }
             if let j = CommandLine.arguments.firstIndex(of: "-snap"), j + 1 < CommandLine.arguments.count {
@@ -143,10 +146,11 @@ final class Monitor: ObservableObject {
             sess = Self.attach(servers, to: sess)
             let groups = Self.group(ps)
             let own = ps.first { $0.pid == getpid() }
+            let owner = agents.owner
             let mentions = index.mentions
             let actions = index.lastAction
             DispatchQueue.main.async {
-                self.sys = s; self.procs = ps; self.groups = groups; self.sessions = sess; self.servers = servers
+                self.sys = s; self.procs = ps; self.groups = groups; self.sessions = sess; self.servers = servers; self.agentOwner = owner
                 if var devs {
                     for i in devs.indices { devs[i].recentUsers = mentions[devs[i].id] ?? [:]; devs[i].lastAction = actions[devs[i].id] }
                     self.devices = devs

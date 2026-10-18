@@ -70,6 +70,15 @@ struct RootView: View {
         .sheet(isPresented: Binding(get: { m.screenshot != nil }, set: { if !$0 { m.screenshot = nil } })) {
             if let s = m.screenshot { LiveView(device: s.device, first: s.image) }
         }
+        .overlay {
+            // Top CPU / Top memory: an overlay, not a sheet, so the confirmations behind its actions can show.
+            if m.top != nil {
+                ZStack {
+                    Color.black.opacity(0.35).ignoresSafeArea().onTapGesture { m.top = nil }
+                    TopSheet()
+                }
+            }
+        }
         .overlay(alignment: .bottom) {
             if let t = m.toast {
                 Text(t).font(.system(size: 11.5, weight: .medium, design: .monospaced))
@@ -173,8 +182,8 @@ struct TelemetryBar: View {
             }.frame(width: 150, alignment: .leading).padding(.leading, 20)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
-                    cell(.processes, "CPU", "\(Int(s.cpu))", "%", Heat.ratio(s.cpu / 100), s.cpu / 100)
-                    cell(.memory, "MEM", Fmt.bytes(s.memUsed), "", Views.pressureColor(s.pressure), Double(s.memUsed) / Double(max(s.memTotal, 1)))
+                    cell(.processes, "CPU", "\(Int(s.cpu))", "%", Heat.ratio(s.cpu / 100), s.cpu / 100, top: .cpu).help("What is using the CPU right now")
+                    cell(.memory, "MEM", Fmt.bytes(s.memUsed), "", Views.pressureColor(s.pressure), Double(s.memUsed) / Double(max(s.memTotal, 1)), top: .memory).help("What is using memory right now")
                     cell(.overview, "GPU", "\(s.gpu)", "%", Aspect.gpu.color, Double(s.gpu) / 100)
                     cell(.disk, "DISK I/O", Fmt.rate(s.diskRead + s.diskWrite), "", Aspect.disk.color, nil)
                     cell(.overview, "NET", Fmt.rate(s.netIn + s.netOut), "", Aspect.network.color, nil)
@@ -191,8 +200,8 @@ struct TelemetryBar: View {
         .background(hud.bg.opacity(0.6))
     }
 
-    func cell(_ t: Page, _ label: String, _ value: String, _ unit: String, _ color: Color, _ ratio: Double?) -> some View {
-        Button { m.tab = t; m.refresh(worktreesNow: t == .worktrees && m.worktrees.isEmpty) } label: {
+    func cell(_ t: Page, _ label: String, _ value: String, _ unit: String, _ color: Color, _ ratio: Double?, top: TopKind? = nil) -> some View {
+        Button { if let top { m.top = top } else { m.tab = t; m.refresh(worktreesNow: t == .worktrees && m.worktrees.isEmpty) } } label: {
             VStack(alignment: .leading, spacing: 3) {
                 Text(label).hudLabel().lineLimit(1)
                 HStack(alignment: .firstTextBaseline, spacing: 3) {
@@ -224,11 +233,11 @@ struct OverviewView: View {
 
                 SectionTitle(title: "Instruments", aspect: .cpu)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 14)], spacing: 14) {
-                    Gauge(aspect: .cpu, label: "Processor", value: s.cpu / 100, big: "\(Int(s.cpu))", unit: "%", color: Heat.ratio(s.cpu / 100)) {
+                    Gauge(aspect: .cpu, label: "Processor", value: s.cpu / 100, big: "\(Int(s.cpu))", unit: "%", color: Heat.ratio(s.cpu / 100), open: { m.top = .cpu }) {
                         Chip(text: "LOAD \(String(format: "%.0f", s.load.0))", color: Aspect.cpu.color)
                         Chip(text: "\(s.cores.count) CORES", color: Aspect.process.color)
                     }
-                    Gauge(aspect: .memory, label: "Memory", value: memRatio, big: "\(Int(memRatio * 100))", unit: "%", color: Aspect.memory.color) {
+                    Gauge(aspect: .memory, label: "Memory", value: memRatio, big: "\(Int(memRatio * 100))", unit: "%", color: Aspect.memory.color, open: { m.top = .memory }) {
                         Chip(text: Views.pressureName(s.pressure).uppercased(), color: Views.pressureColor(s.pressure), filled: s.pressure >= 2)
                         Chip(text: "SWAP \(Fmt.bytes(s.swapUsed))", color: Aspect.process.color)
                     }
@@ -421,10 +430,11 @@ struct Gauge<Extra: View>: View {
     let big: String
     let unit: String
     let color: Color
+    var open: (() -> Void)? = nil      // a gauge that opens its Top list when clicked
     @ViewBuilder var extra: Extra
     @Environment(\.colorScheme) private var scheme
     var body: some View {
-        Panel(aspect: aspect) {
+        let panel = Panel(aspect: aspect) {
             HStack(spacing: 14) {
                 ZStack {
                     Ring(value: value, color: color.readable(scheme))
@@ -434,12 +444,16 @@ struct Gauge<Extra: View>: View {
                     }
                 }.frame(width: 92, height: 92)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(label).hudLabel(aspect.color.readable(scheme)).lineLimit(1)
+                    HStack {
+                        Text(label).hudLabel(aspect.color.readable(scheme)).lineLimit(1)
+                        if open != nil { Spacer(); Text("top users").hudLabel(); Image(systemName: "arrow.up.right").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary) }
+                    }
                     FlowChips { extra }
                 }
                 Spacer(minLength: 0)
             }
         }
+        if let open { Button(action: open) { panel.contentShape(Rectangle()) }.buttonStyle(.plain) } else { panel }
     }
 }
 
