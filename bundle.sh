@@ -1,9 +1,11 @@
 #!/bin/zsh
 # Builds RigWatch.app and installs it in ~/Applications.
+# RIGWATCH_APP picks another destination and RIGWATCH_SWIFT_FLAGS adds swift build flags
+# (the Homebrew formula uses both).
 set -e
 cd "${0:a:h}"
-swift build -c release
-APP=~/Applications/RigWatch.app
+swift build -c release ${=RIGWATCH_SWIFT_FLAGS}
+APP=${RIGWATCH_APP:-~/Applications/RigWatch.app}
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/RigWatch "$APP/Contents/MacOS/RigWatch"
 # App icon: every size macOS asks for, from the one 1024 px master.
