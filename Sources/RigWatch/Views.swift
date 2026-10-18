@@ -49,6 +49,7 @@ struct RootView: View {
                     case .overview: OverviewView()
                     case .devices: DevicesView()
                     case .sessions: SessionsView()
+                    case .servers: DevServersView()
                     case .processes: ProcessesView()
                     case .memory: MemoryView()
                     case .worktrees: WorktreesView()
@@ -153,6 +154,7 @@ struct Sidebar: View {
         case .devices: let n = m.emulatorCount + m.simulatorCount; return n > 0 ? String(format: "%02d", n) : nil
         case .sessions: let n = m.sessions.filter(\.live).count; return n > 0 ? String(format: "%02d", n) : nil
         case .worktrees: let n = m.worktrees.filter { !$0.isMain }.count; return n > 0 ? String(format: "%02d", n) : nil
+        case .servers: let n = m.servers.count; return n > 0 ? String(format: "%02d", n) : nil
         default: return nil
         }
     }
@@ -691,9 +693,13 @@ struct SessionCard: View {
                     Readout(label: "Procs", value: "\(s.procCount)", size: 20)
                     Readout(label: "Active", value: Fmt.age(s.transcriptAge).replacingOccurrences(of: " ago", with: ""), size: 20)
                 }
-                if !s.devices.isEmpty || s.worktrees > 0 {
+                if !s.devices.isEmpty || s.worktrees > 0 || !s.servers.isEmpty {
                     FlowChips {
                         ForEach(s.devices, id: \.self) { Chip(text: $0, icon: Aspect.android.icon, color: Aspect.android.color) }
+                        ForEach(s.servers, id: \.self) { x in
+                            Button { m.tab = .servers } label: { Chip(text: x.uppercased(), icon: Aspect.server.icon, color: Aspect.server.color) }
+                                .buttonStyle(.plain).help("Dev server this session started. Click to see it on Dev Servers.")
+                        }
                         if s.worktrees > 0 { Chip(text: "\(s.worktrees) WORKTREE\(s.worktrees == 1 ? "" : "S")", icon: Aspect.worktree.icon, color: Aspect.worktree.color) }
                     }
                 }
@@ -702,6 +708,90 @@ struct SessionCard: View {
                         .padding(.leading, 9).overlay(alignment: .leading) { Rectangle().fill(Color(nsColor: s.agent.color)).frame(width: 2) }
                 }
                 OpenSessionButton(session: s)
+            }
+        }
+    }
+}
+
+// MARK: Dev servers
+
+struct DevServersView: View {
+    @ObservedObject private var m = Monitor.shared
+    var body: some View {
+        let agent = m.servers.filter { $0.session != nil }
+        let other = m.servers.filter { $0.session == nil }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                SectionTitle(title: "Started by an agent session", aspect: .server, count: agent.count)
+                grid(agent, empty: "No agent session has a server listening")
+                SectionTitle(title: "Other local servers", aspect: .process, count: other.count)
+                grid(other, empty: "None listening")
+                Text("Every process of yours with a TCP port open for listening. The session that started a server is remembered, so it still shows after that session ends and the server is left running.")
+                    .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
+            }.padding(20)
+        }
+    }
+
+    @ViewBuilder func grid(_ list: [DevServer], empty: String) -> some View {
+        if list.isEmpty {
+            Text(empty).hudLabel().padding(.leading, 14)
+        } else {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 400), spacing: 14, alignment: .top)], spacing: 14) { ForEach(list) { DevServerCard(d: $0) } }
+        }
+    }
+}
+
+struct DevServerCard: View {
+    @ObservedObject private var m = Monitor.shared
+    @Environment(\.colorScheme) private var scheme
+    let d: DevServer
+    var body: some View {
+        let s = m.session(d.session)
+        let ended = d.session != nil && !(s?.live ?? false)
+        Panel(aspect: .server) {
+            VStack(alignment: .leading, spacing: 11) {
+                HStack(alignment: .top, spacing: 12) {
+                    IconBadge(aspect: .server, size: 34)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(d.kind).font(.system(size: 16, weight: .semibold)).lineLimit(1)
+                        Text([d.cwd.map { ($0 as NSString).lastPathComponent }, d.name, "pid \(d.pid)"].compactMap { $0 }.joined(separator: " · ")).hudLabel().lineLimit(1)
+                    }
+                    Spacer()
+                    HStack(spacing: 4) {
+                        ForEach(d.ports, id: \.self) { p in
+                            Button { m.openServer(d, port: p) } label: { Chip(text: ":\(p)", color: Aspect.server.color, filled: true) }
+                                .buttonStyle(.plain).help("Open http://localhost:\(p)")
+                        }
+                    }.fixedSize()
+                }
+                HStack(spacing: 22) {
+                    Readout(label: "CPU", value: Fmt.cpu(d.cpu), color: Heat.cpu(d.cpu).readable(scheme), size: 20)
+                    Readout(label: "Memory", value: Fmt.bytes(d.mem), color: Aspect.memory.color.readable(scheme), size: 20)
+                    Readout(label: "Uptime", value: d.started.map { Fmt.ago($0).replacingOccurrences(of: " ago", with: "") } ?? "—", size: 20)
+                }
+                if let c = d.cwd {
+                    Text(Views.tilde(c)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(c)
+                }
+                HStack(spacing: 8) {
+                    Text("Started by").hudLabel().fixedSize().frame(width: 80, alignment: .leading)
+                    if let id = d.session {
+                        if s != nil { SessionLink(id: id).layoutPriority(1) }
+                        else { Chip(text: d.sessionTitle ?? String(id.prefix(8)), icon: Aspect.claude.icon, color: Aspect.process.color).layoutPriority(1) }
+                        if ended { Chip(text: "SESSION ENDED", color: Color(hex: 0xFFD23F)).fixedSize() }
+                        else if let s { HStack(spacing: 4) { Dot(color: Heat.status(s.status)); Text(s.status).hudLabel(Heat.status(s.status)) }.fixedSize() }
+                    } else if d.orphaned {
+                        Chip(text: "ORPHANED", icon: "exclamationmark.triangle", color: Color(hex: 0xFF8A3D)).fixedSize().help("Its parent exited; launchd adopted it.")
+                    } else {
+                        Text(m.startedBy(d).replacingOccurrences(of: "parent: ", with: "")).font(.system(size: 11, design: .monospaced)).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+                HStack {
+                    Button { m.openServer(d) } label: { Label("Open", systemImage: "safari") }.buttonStyle(HUDButton(color: Aspect.server.color, filled: true))
+                        .help("Open http://localhost:\(d.ports.first ?? 0) in your browser")
+                    Spacer()
+                    Button { m.confirmStop(d) } label: { Label("Stop", systemImage: "stop.circle") }.buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E)))
+                }
             }
         }
     }

@@ -68,9 +68,12 @@ enum Agent: String, CaseIterable {
 
 /// Sessions for every agent other than Claude Code (which `SessionIndex` reads from its transcripts).
 final class AgentIndex {
-    private struct Live { let agent: Agent; let root: Proc; var cpu: Double; var mem: UInt64; var procs: Int; var cwd: String?; var via: String? }
+    private struct Live { let agent: Agent; let root: Proc; var cpu: Double; var mem: UInt64; var procs: Int; var cwd: String?; var via: String?; var members: [Int32] = [] }
+    /// pid -> id of the session whose process tree it is in, from the last `sessions` call.
+    private(set) var owner: [Int32: String] = [:]
 
     func sessions(_ ps: [Proc]) -> [Session] {
+        owner = [:]
         let byPid = Dictionary(uniqueKeysWithValues: ps.map { ($0.pid, $0) })
         var kids: [Int32: [Int32]] = [:]
         for p in ps { kids[p.ppid, default: []].append(p.pid) }
@@ -93,7 +96,7 @@ final class AgentIndex {
             var stack = [p.pid]
             while let x = stack.popLast() {
                 guard let q = byPid[x] else { continue }
-                l.cpu += q.cpu; l.mem += q.mem; l.procs += 1
+                l.cpu += q.cpu; l.mem += q.mem; l.procs += 1; l.members.append(x)
                 for c in kids[x] ?? [] where (kind[c] == nil || kind[c] == k) && !(byPid[c].map(Agent.isOpenCodeService) ?? false) { stack.append(c) }
             }
             lives.append(l)
@@ -122,6 +125,7 @@ final class AgentIndex {
                 // Basic: no session files to read, so "active" follows CPU.
                 s.transcriptAge = l.cpu > 5 ? 0 : started.map { Date().timeIntervalSince($0) }
             }
+            for m in l.members { owner[m] = s.id }
             out.append(s)
         }
         return out

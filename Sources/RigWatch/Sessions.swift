@@ -14,6 +14,7 @@ struct Session: Identifiable, Hashable {
     var mem: UInt64 = 0
     var devices: [String] = []     // emulators / simulators it launched or recently drove
     var worktrees = 0
+    var servers: [String] = []     // dev servers it started, e.g. "Vite :5173"
     var agent: Agent = .claude
     var cwd: String?
     var started: Date?

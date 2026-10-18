@@ -2,12 +2,12 @@ import AppKit
 import Foundation
 
 enum Page: String, CaseIterable, Identifiable {
-    case overview = "Overview", devices = "Emulators & Simulators", sessions = "Agent Sessions",
+    case overview = "Overview", devices = "Emulators & Simulators", sessions = "Agent Sessions", servers = "Dev Servers",
          processes = "Processes", memory = "Memory", worktrees = "Worktrees", disk = "Disk"
     var id: String { rawValue }
     var icon: String {
         switch self {
-        case .overview: "gauge.with.dots.needle.33percent"; case .devices: "iphone.gen3"; case .sessions: "bubble.left.and.text.bubble.right"
+        case .overview: "gauge.with.dots.needle.33percent"; case .devices: "iphone.gen3"; case .sessions: "bubble.left.and.text.bubble.right"; case .servers: "server.rack"
         case .processes: "cpu"; case .memory: "memorychip"; case .worktrees: "arrow.triangle.branch"; case .disk: "internaldrive"
         }
     }
@@ -39,6 +39,7 @@ final class Monitor: ObservableObject {
     @Published var groups: [ProcGroup] = []
     @Published var devices: [Device] = []
     @Published var sessions: [Session] = []
+    @Published var servers: [DevServer] = []
     @Published var worktrees: [Worktree] = []
     @Published var folders: [Folder] = Demo.on ? Demo.folders() : Monitor.defaultFolders()
     @Published var pending: Pending?
@@ -56,6 +57,7 @@ final class Monitor: ObservableObject {
     private let devSampler = DeviceSampler()
     private let index = SessionIndex()
     private let agents = AgentIndex()
+    private let serverScanner = DevServerScanner()
     private var running = false
     private var tick = 0
     private var lastFull = Date.distantPast
@@ -108,7 +110,8 @@ final class Monitor: ObservableObject {
         if Demo.on {
             let ps = Demo.procs(tick)
             sys = Demo.sys(tick, procs: ps, real: sys.memTotal > 0 ? sys : sysSampler.sample())
-            procs = ps; groups = Demo.groups(ps); sessions = Demo.sessions(tick); devices = Demo.devices(tick)
+            procs = ps; groups = Demo.groups(ps); devices = Demo.devices(tick)
+            servers = Demo.servers(tick); sessions = Self.attach(servers, to: Demo.sessions(tick))
             if worktrees.isEmpty { worktrees = Demo.worktrees() }
             selfCPU = 0.5; selfMem = 140 << 20
             return
@@ -121,7 +124,7 @@ final class Monitor: ObservableObject {
         if wantMentions { lastMentions = Date() }
         if wantWorktrees { lastWorktrees = Date() }
         let oldWorktrees = worktrees
-        q.async { [procSampler, sysSampler, devSampler, index, agents] in
+        q.async { [procSampler, sysSampler, devSampler, index, agents, serverScanner] in
             let s = sysSampler.sample()
             guard visible else {
                 DispatchQueue.main.async { self.sys = s; self.running = false }
@@ -134,14 +137,16 @@ final class Monitor: ObservableObject {
             // holds back the live numbers.
             if wantWorktrees { self.listWorktrees(ps: ps, old: oldWorktrees) }
             let wts: [Worktree]? = oldWorktrees   // last listing, for per-session worktree counts
-            let sess = (Self.buildSessions(ps, devs, wts, index, procSampler) + agents.sessions(ps))
+            var sess = (Self.buildSessions(ps, devs, wts, index, procSampler) + agents.sessions(ps))
                 .sorted { ($0.live ? 0 : 1, $0.transcriptAge ?? .infinity) < ($1.live ? 0 : 1, $1.transcriptAge ?? .infinity) }
+            let servers = serverScanner.scan(ps, sessions: sess, agentOwner: agents.owner)
+            sess = Self.attach(servers, to: sess)
             let groups = Self.group(ps)
             let own = ps.first { $0.pid == getpid() }
             let mentions = index.mentions
             let actions = index.lastAction
             DispatchQueue.main.async {
-                self.sys = s; self.procs = ps; self.groups = groups; self.sessions = sess
+                self.sys = s; self.procs = ps; self.groups = groups; self.sessions = sess; self.servers = servers
                 if var devs {
                     for i in devs.indices { devs[i].recentUsers = mentions[devs[i].id] ?? [:]; devs[i].lastAction = actions[devs[i].id] }
                     self.devices = devs
@@ -150,6 +155,15 @@ final class Monitor: ObservableObject {
                 self.running = false
             }
         }
+    }
+
+    /// Lists each dev server on the card of the session that started it.
+    nonisolated private static func attach(_ servers: [DevServer], to sess: [Session]) -> [Session] {
+        var sess = sess
+        for d in servers {
+            if let id = d.session, let i = sess.firstIndex(where: { $0.id == id }) { sess[i].servers.append(d.label) }
+        }
+        return sess
     }
 
     nonisolated private static func group(_ ps: [Proc]) -> [ProcGroup] {
@@ -234,6 +248,40 @@ final class Monitor: ObservableObject {
         msg += force ? "\n\nForce Quit (SIGKILL) gives it no chance to save anything." : "\n\nQuit sends SIGTERM so it can shut down cleanly."
         pending = Pending(title: force ? "Force quit \(p.name)?" : "Quit \(p.name)?", message: msg, button: force ? "Force Quit" : "Quit") {
             kill(p.pid, force ? SIGKILL : SIGTERM) == 0 ? "Sent \(force ? "SIGKILL" : "SIGTERM") to \(p.name) (\(p.pid))." : "Could not signal \(p.pid): \(String(cString: strerror(errno)))"
+        }
+    }
+
+    /// Started-by line for a dev server: the live session, the remembered one, or its parent.
+    func startedBy(_ d: DevServer) -> String {
+        if let id = d.session {
+            let s = session(id)
+            let title = s?.title ?? d.sessionTitle ?? String(id.prefix(8))
+            return (s?.live ?? false) ? "started by \(title)" : "started by \(title) (session ended)"
+        }
+        if d.orphaned { return "orphaned" }
+        return d.parent.map { "parent: \($0)" } ?? "parent: pid \(d.ppid)"
+    }
+
+    func openServer(_ d: DevServer, port: Int? = nil) {
+        guard let p = port ?? d.ports.first, let url = URL(string: "http://localhost:\(p)") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Stop = Quit (SIGTERM) for the server's process, with the same rules and confirmation.
+    func confirmStop(_ d: DevServer) {
+        if Demo.on { toast = "Demo mode: nothing was changed."; return }
+        guard let p = procs.first(where: { $0.pid == d.pid && $0.start == d.start }) else { toast = "\(d.kind) is no longer running."; return }
+        if let why = Safety.processBlock(p) { toast = "Not allowed: \(why)"; return }
+        var msg = "\(d.label) · \(p.name) (pid \(p.pid)) · CPU \(Fmt.cpu(p.cpu)) · \(Fmt.bytes(p.mem))"
+        if let c = d.cwd { msg += "\n\(Views.tilde(c))" }
+        msg += "\n\n" + startedBy(d).prefix(1).uppercased() + startedBy(d).dropFirst()
+        if let w = Safety.processWarning(p, sessions: sessions) { msg += "\n\n⚠️ \(w)" }
+        msg += "\n\nStop sends SIGTERM so it can shut down cleanly."
+        let pid = d.pid, start = d.start, name = d.kind
+        pending = Pending(title: "Stop \(d.kind)?", message: msg, button: "Stop") {
+            // The pid may have been reused since the dialog opened: only signal the same process.
+            guard ProcSampler.startTime(pid) == start else { return "\(name) had already stopped." }
+            return kill(pid, SIGTERM) == 0 ? "Sent SIGTERM to \(name) (\(pid))." : "Could not signal \(pid): \(String(cString: strerror(errno)))"
         }
     }
 

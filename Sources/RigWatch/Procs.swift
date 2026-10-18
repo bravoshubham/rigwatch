@@ -15,6 +15,7 @@ struct Proc: Identifiable, Hashable {
     var session: String?     // CLAUDE_CODE_SESSION_ID inherited by this process, if any
     var hostSession: String? // CLAUDE_CODE_HOST_SESSION_ID (desktop app's local_… id), if any
     var args: [String]
+    var start: UInt64 = 0    // start time (mach abs), own processes only: with pid, names one process run
     var id: Int32 { pid }
     var isOwn: Bool { uid == getuid() }
 }
@@ -60,6 +61,7 @@ final class ProcSampler {
                 p.mem = ri.ri_phys_footprint
                 prev[pid] = Prev(cpuTicks: ticks, read: ri.ri_diskio_bytesread, write: ri.ri_diskio_byteswritten, start: ri.ri_proc_start_abstime)
                 let start = ri.ri_proc_start_abstime
+                p.start = start
                 if meta[pid]?.start != start { meta[pid] = readMeta(pid, start: start) }
                 p.args = meta[pid]?.args ?? []
                 p.session = meta[pid]?.session
@@ -133,6 +135,15 @@ final class ProcSampler {
         if p.uid == 0 { return "System (root)" }
         if path.hasPrefix("/System/") || path.hasPrefix("/usr/libexec/") || path.hasPrefix("/usr/sbin/") { return "macOS services" }
         return name
+    }
+
+    /// Start time (mach abs) of one of our processes, to tell a pid apart from a reused one.
+    static func startTime(_ pid: Int32) -> UInt64? {
+        var ri = rusage_info_v4()
+        let rc = withUnsafeMutablePointer(to: &ri) {
+            $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
+        }
+        return rc == 0 ? ri.ri_proc_start_abstime : nil
     }
 
     /// Current directory of one of our processes (for "is this worktree in use?").

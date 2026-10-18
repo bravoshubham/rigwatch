@@ -46,6 +46,26 @@ enum Demo {
         return x
     }
 
+    // MARK: dev servers
+
+    static func servers(_ tick: Int) -> [DevServer] {
+        func d(_ pid: Int32, _ ppid: Int32, _ name: String, _ kind: String, _ ports: [Int], _ dir: String, _ up: TimeInterval, _ cpu: Double, _ mem: UInt64,
+               session: String? = nil, title: String? = nil, parent: String? = nil) -> DevServer {
+            var x = DevServer(pid: pid, start: UInt64(pid), ppid: ppid, name: name, kind: kind, ports: ports)
+            x.cwd = "/Users/demo/code/" + dir; x.started = ago(up); x.cpu = wob(cpu, tick, Int(pid)); x.mem = mem
+            x.session = session; x.sessionTitle = title; x.parent = parent
+            return x
+        }
+        return [
+            d(20_611, 20_604, "node", "Vite", [5173], "acme-web", 2 * 3600, 3.2, 310 * mb, session: sessionSeed[0].id, title: sessionSeed[0].title),
+            d(20_633, 20_630, "python3.12", "uvicorn", [8000], "acme-api", 3_900, 0.8, 120 * mb, session: sessionSeed[4].id, title: sessionSeed[4].title),
+            // Its session ended hours ago; the server was left running and launchd adopted it.
+            d(20_655, 1, "next-server", "Next.js", [3000], "acme-site", 86_400 + 4 * 3600, 0.4, 540 * mb,
+              session: "7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d", title: "Pricing page: annual toggle"),
+            d(20_677, 20_670, "node", "Storybook", [6006], "acme-design-system", 5 * 3600, 0.6, 410 * mb, parent: "zsh (20670)"),
+        ]
+    }
+
     // MARK: processes
 
     private struct P { let group, name, path: String; let n: Int; let cpu: Double; let mem: UInt64; let root: Bool }
