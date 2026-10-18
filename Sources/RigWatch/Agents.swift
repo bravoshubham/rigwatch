@@ -114,6 +114,7 @@ final class AgentIndex {
                             host: l.via.map { "via \($0)" } ?? (l.agent.full ? "CLI" : "App"))
             s.agent = l.agent; s.cwd = l.cwd; s.started = started
             s.procCount = l.procs; s.cpu = l.cpu; s.mem = l.mem
+            if l.root.start != 0 { s.pids = [l.root.pid: l.root.start] }
             // Full agents: the session named on the command line, else the newest one of that tool in this folder.
             let rows = l.agent == .opencode ? ocRows : l.agent == .codex ? cxRows : []
             let named = Agent.sessionArg(l.root.args).flatMap { id in rows.first { $0.id == id } }

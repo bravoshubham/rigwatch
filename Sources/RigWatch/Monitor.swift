@@ -180,6 +180,7 @@ final class Monitor: ObservableObject {
 
     nonisolated private static func buildSessions(_ ps: [Proc], _ devs: [Device]?, _ wts: [Worktree]?, _ index: SessionIndex, _ sampler: ProcSampler) -> [Session] {
         var live: [String: String] = [:]   // id -> host
+        var cliPids: [String: [Int32: UInt64]] = [:]   // id -> its terminal `claude` processes, the ones Quit session may end
         let byPid = Dictionary(uniqueKeysWithValues: ps.map { ($0.pid, $0) })
         var kids: [Int32: [Int32]] = [:]
         for p in ps { kids[p.ppid, default: []].append(p.pid) }
@@ -192,7 +193,12 @@ final class Monitor: ObservableObject {
                 let a = p.args[i]
                 id = a.contains("=") ? String(a.split(separator: "=")[1]) : (i + 1 < p.args.count ? p.args[i + 1] : nil)
             }
-            if let id { live[id] = sampler.hostSession(p.pid) != nil ? "Desktop" : "CLI" }
+            guard let id else { continue }
+            if sampler.hostSession(p.pid) != nil { live[id] = "Desktop" }   // run by the Claude app: left to the app
+            else {
+                if live[id] == nil { live[id] = "CLI" }
+                if p.start != 0 { cliPids[id, default: [:]][p.pid] = p.start }
+            }
         }
         var ids = Set(live.keys)
         for p in ps { if let s = p.session { ids.insert(s) } }
@@ -203,6 +209,7 @@ final class Monitor: ObservableObject {
         for id in ids {
             out[id] = index.describe(id, live: live[id] != nil, host: live[id] ?? "gone")
             out[id]!.hostId = hosts[id] ?? index.hostId(forCli: id)
+            out[id]!.pids = cliPids[id] ?? [:]
         }
         // Attribute every process to the session whose id it inherited.
         for p in ps { if let s = p.session, out[s] != nil { out[s]!.procCount += 1; out[s]!.cpu += p.cpu; out[s]!.mem += p.mem } }
@@ -236,6 +243,8 @@ final class Monitor: ObservableObject {
                 self.toast = msg
                 self.lastWorktrees = .distantPast
                 self.refresh(worktreesNow: key.hasPrefix("wt:"))
+                // A quit process can take a moment to exit: look again so its card goes promptly.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { self.refresh() }
             }
         }
     }
@@ -248,6 +257,48 @@ final class Monitor: ObservableObject {
         msg += force ? "\n\nForce Quit (SIGKILL) gives it no chance to save anything." : "\n\nQuit sends SIGTERM so it can shut down cleanly."
         pending = Pending(title: force ? "Force quit \(p.name)?" : "Quit \(p.name)?", message: msg, button: force ? "Force Quit" : "Quit") {
             kill(p.pid, force ? SIGKILL : SIGTERM) == 0 ? "Sent \(force ? "SIGKILL" : "SIGTERM") to \(p.name) (\(p.pid))." : "Could not signal \(p.pid): \(String(cString: strerror(errno)))"
+        }
+    }
+
+    /// Quit session: SIGTERM to the session's own agent process(es), never the Claude app.
+    func confirmQuitSession(_ s: Session) {
+        if Demo.on { toast = "Demo mode: nothing was changed."; return }
+        let targets = s.pids.compactMap { pid, start in procs.first { $0.pid == pid && $0.start == start } }.sorted { $0.pid < $1.pid }
+        guard !targets.isEmpty else {
+            toast = s.host == "Desktop" ? "Desktop sessions run inside the Claude app: archive this one there." : "\(s.title) is no longer running."
+            return
+        }
+        for p in targets {
+            if let why = Safety.processBlock(p) { toast = "Not allowed: \(why)"; return }
+            if p.path.hasSuffix("Claude.app/Contents/MacOS/Claude") { toast = "Not allowed: that is the Claude desktop app."; return }
+        }
+        let host = s.host == "Desktop" ? "CLI" : s.host   // a Desktop card only lists its terminal processes here
+        var msg = "\(s.agent.rawValue) · \(s.title)"
+        msg += "\n" + targets.map { "\($0.name) (pid \($0.pid)) · \(host) · CPU \(Fmt.cpu($0.cpu)) · \(Fmt.bytes($0.mem))" }.joined(separator: "\n")
+        if targets.count > 1 { msg += "\n\nThis session is open in \(targets.count) processes (a resume runs alongside the original): all of them are quit." }
+        if s.host == "Desktop" { msg += "\n\nThe Claude app's own process for this session is left alone; archive the session in the Claude app to end it there." }
+        if s.host == "App", let p = targets.first { msg += "\n\n⚠️ This quits \(p.name) itself, with all of its windows." }
+        if s.isWorking { msg += "\n\n⚠️ This session is working right now: quitting stops it mid-turn." }
+        if !s.id.hasPrefix("pid:"), let cmd = s.agent.resumeCommand(s.id) {
+            msg += "\n\nThe conversation is saved. Resume it later with:\n\(cmd)"
+        } else {
+            msg += "\n\nWhat \(s.agent.rawValue) keeps after quitting is up to it; RigWatch has no resume command for it."
+        }
+        let mine = Set(targets.map(\.pid))
+        let kids = procs.filter { !mine.contains($0.pid) && $0.session == s.id }.count
+        if kids > 0 { msg += "\n\nThe \(kids) process(es) it started (MCP servers, dev servers, builds) are not stopped here. Any that keep running stay on Processes and Dev Servers." }
+        msg += "\n\nQuit sends SIGTERM so it can shut down cleanly."
+        let list = targets.map { ($0.pid, $0.start) }, name = s.agent.rawValue
+        pending = Pending(title: "Quit session \(s.title.prefix(40))?", message: msg, button: "Quit Session") {
+            var sent: [Int32] = [], gone = 0, failed: [String] = []
+            for (pid, start) in list {
+                // The pid may have been reused since the dialog opened: only signal the same process.
+                guard ProcSampler.startTime(pid) == start else { gone += 1; continue }
+                if kill(pid, SIGTERM) == 0 { sent.append(pid) } else { failed.append("\(pid): \(String(cString: strerror(errno)))") }
+            }
+            if !failed.isEmpty { return "Could not signal " + failed.joined(separator: ", ") }
+            if sent.isEmpty { return "\(name) had already exited." }
+            return "Sent SIGTERM to \(name) (pid \(sent.map(String.init).joined(separator: ", ")))." + (gone > 0 ? " \(gone) had already exited." : "")
         }
     }
 

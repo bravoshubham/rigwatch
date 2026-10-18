@@ -18,6 +18,7 @@ struct Session: Identifiable, Hashable {
     var agent: Agent = .claude
     var cwd: String?
     var started: Date?
+    var pids: [Int32: UInt64] = [:]   // the session's own agent process(es) that may be quit -> start time; never the Claude app's
 
     var status: String {
         guard live else { return transcriptAge.map { $0 < 600 ? "Closed (recent)" : "Closed" } ?? "Closed" }

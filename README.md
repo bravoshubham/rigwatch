@@ -152,6 +152,11 @@ Built from source instead? Skip the first two steps and delete the app with
 
 - **Nothing is closed without asking.** Every quit, shut-down and removal shows what will happen
   and who is using it first. macOS's own processes and other users' processes are never offered.
+- **Quit session ends a session's own agent process**: on a live session card it sends SIGTERM to
+  that session's terminal `claude` (or other agent) process after saying which pid it is and the
+  command that resumes it. Sessions in the Claude desktop app are left to the app (archive them there).
+  RigWatch does not stop the processes the session started: its MCP servers normally exit with it,
+  and dev servers it left running stay on Dev Servers.
 - **Worktree removal is checked first**: anything with uncommitted changes, untracked files (other
   than build output), unpushed commits or a process inside it is kept.
 - **Process environments are never stored.** RigWatch reads exactly two variables from its own

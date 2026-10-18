@@ -707,7 +707,10 @@ struct SessionCard: View {
                     Text("“\(s.lastPrompt)”").font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(3).help(s.lastPrompt)
                         .padding(.leading, 9).overlay(alignment: .leading) { Rectangle().fill(Color(nsColor: s.agent.color)).frame(width: 2) }
                 }
-                OpenSessionButton(session: s)
+                HStack(spacing: 8) {
+                    OpenSessionButton(session: s)
+                    if s.live { QuitSessionButton(session: s) }
+                }
             }
         }
     }
@@ -1403,6 +1406,23 @@ struct OpenSessionButton: View {
             .buttonStyle(HUDButton(color: Color(nsColor: session.agent.color), filled: { if case .open = act { true } else { false } }()))
             .disabled({ if case .none = act { true } else { false } }())
             .help(act.help)
+    }
+}
+
+/// Ends a live session's own agent process, after the confirmation in Monitor.confirmQuitSession.
+struct QuitSessionButton: View {
+    @ObservedObject private var m = Monitor.shared
+    let session: Session
+    var body: some View {
+        let s = session
+        let can = Demo.on ? s.host != "Desktop" : !s.pids.isEmpty   // demo cards follow the real rule
+        let help = can ? "Quits this session's \(s.agent.rawValue) process (SIGTERM), after asking." + (s.agent.resumeCommand(s.id) != nil && !s.id.hasPrefix("pid:") ? " Its conversation stays saved." : "")
+            : s.host == "Desktop" ? "This session runs inside the Claude app. Archive it in the Claude app to end it."
+            : "RigWatch can't tell which process runs this session; find it on Processes."
+        Button { m.confirmQuitSession(s) } label: { Label("Quit session", systemImage: "xmark.circle") }
+            .buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E)))
+            .disabled(!can)
+            .help(help)
     }
 }
 
