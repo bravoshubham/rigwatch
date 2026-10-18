@@ -334,7 +334,9 @@ final class Monitor: ObservableObject {
         guard !busy.contains("folders"), !Demo.on else { return }
         if !force, let at = foldersScannedAt, Date().timeIntervalSince(at) < 6 * 3600 { return }   // auto-rescan at most every 6 h
         busy.insert("folders")
-        let fs = folders.filter { FileManager.default.fileExists(atPath: $0.path) }
+        // Only the curated list is measured here; everything else is found again by discoverFolders.
+        let curated = Set(Self.curatedFolders().map(\.path))
+        let fs = folders.filter { curated.contains($0.path) && FileManager.default.fileExists(atPath: $0.path) }
         slow.async {
             DispatchQueue.concurrentPerform(iterations: fs.count) { i in   // folders don't overlap; Worktrees.sizeKB caps how many du run at once
                 let kb = Worktrees.sizeKB(fs[i].path)
@@ -368,27 +370,53 @@ final class Monitor: ObservableObject {
     @Published var children: [String: [Folder]] = [:]       // path -> its entries with sizes
 
     func openFolder(_ path: String) {
+        guard !Worktrees.isPrivate(path) else { return }
         drill.append(path)
         guard children[path] == nil else { return }
         if Demo.on { children[path] = Demo.children(of: path); return }
         busy.insert("drill")
         slow.async {
-            // One du call sizes every child: directories and files, one level down.
-            let r = Sh.run("/usr/sbin/taskpolicy", ["-b", "/usr/bin/du", "-k", "-a", "-d", "1", path], timeout: 600)
-            let items = r.out.split(separator: "\n").compactMap { line -> Folder? in
-                let f = line.split(separator: "\t", maxSplits: 1)
-                guard f.count == 2, let kb = Int64(f[0]), String(f[1]) != path else { return nil }
-                return Folder(label: (String(f[1]) as NSString).lastPathComponent, path: String(f[1]), kb: kb)
-            }.sorted { ($0.kb ?? 0) > ($1.kb ?? 0) }
+            var items: [Folder]
+            if Worktrees.holdsPrivate(path) {
+                // The home folder (or above): size each child on its own and leave the private ones unopened.
+                let names = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
+                let kids = names.map { path == "/" ? "/" + $0 : path + "/" + $0 }.filter { !Worktrees.isPrivate($0) }
+                var sizes = [Int64?](repeating: nil, count: kids.count)
+                let lock = NSLock()
+                DispatchQueue.concurrentPerform(iterations: kids.count) { i in
+                    let kb = Worktrees.sizeKB(kids[i])
+                    lock.lock(); sizes[i] = kb; lock.unlock()
+                }
+                items = kids.indices.compactMap { i in sizes[i].map { Folder(label: (kids[i] as NSString).lastPathComponent, path: kids[i], kb: $0) } }
+            } else {
+                // One du call sizes every child: directories and files, one level down.
+                let r = Sh.run("/usr/sbin/taskpolicy", ["-b", "/usr/bin/du", "-k", "-a", "-d", "1"] + Worktrees.duIgnore + [path], timeout: 600)
+                items = r.out.split(separator: "\n").compactMap { line -> Folder? in
+                    let f = line.split(separator: "\t", maxSplits: 1)
+                    guard f.count == 2, let kb = Int64(f[0]), String(f[1]) != path else { return nil }
+                    return Folder(label: (String(f[1]) as NSString).lastPathComponent, path: String(f[1]), kb: kb)
+                }
+            }
+            items.sort { ($0.kb ?? 0) > ($1.kb ?? 0) }
             DispatchQueue.main.async { self.children[path] = items; self.busy.remove("drill") }
         }
     }
 
     static func defaultFolders() -> [Folder] {
-        let h = Sh.home
         let saved = UserDefaults.standard.dictionary(forKey: "folderKB") as? [String: Int64] ?? [:]
-        // Non-overlapping on purpose: each byte belongs to one block of the storage map.
-        let list = [
+        let curated = curatedFolders().map { var f = $0; f.kb = saved[f.path]; return f }
+        let found = (UserDefaults.standard.array(forKey: "foundFolders") as? [[String: Any]] ?? []).compactMap { d -> Folder? in
+            guard let l = d["label"] as? String, let p = d["path"] as? String, let kb = d["kb"] as? Int64, !Worktrees.isPrivate(p) else { return nil }
+            return Folder(label: l, path: p, kb: kb)
+        }
+        return curated + found
+    }
+
+    /// Non-overlapping on purpose: each byte belongs to one block of the storage map. No folder macOS
+    /// guards with a privacy prompt (see Worktrees.privateHome).
+    static func curatedFolders() -> [Folder] {
+        let h = Sh.home
+        return [
             Folder(label: "Emulators", path: h + "/.android/avd"),
             Folder(label: "Android SDK", path: h + "/Library/Android/sdk"),
             Folder(label: "Simulators", path: h + "/Library/Developer/CoreSimulator"),
@@ -398,15 +426,8 @@ final class Monitor: ObservableObject {
             Folder(label: "~/.claude", path: h + "/.claude"),
             Folder(label: "App caches", path: h + "/Library/Caches"),
             Folder(label: "Containers", path: h + "/Library/Containers"),
-            Folder(label: "Downloads", path: h + "/Downloads"),
             Folder(label: "Applications", path: "/Applications"),
         ]
-        let curated = list.map { var f = $0; f.kb = saved[f.path]; return f }
-        let found = (UserDefaults.standard.array(forKey: "foundFolders") as? [[String: Any]] ?? []).compactMap { d -> Folder? in
-            guard let l = d["label"] as? String, let p = d["path"] as? String, let kb = d["kb"] as? Int64 else { return nil }
-            return Folder(label: l, path: p, kb: kb)
-        }
-        return curated + found
     }
 
     /// Everything the curated list doesn't name: each child of the folders that hold the curated ones
@@ -421,7 +442,7 @@ final class Monitor: ObservableObject {
             guard let names = try? fm.contentsOfDirectory(atPath: parent) else { continue }
             for n in names {
                 let p = parent + "/" + n
-                guard !skip.contains(p), !known.contains(where: { $0.hasPrefix(p + "/") }),
+                guard !skip.contains(p), !Worktrees.isPrivate(p), !known.contains(where: { $0.hasPrefix(p + "/") }),
                       let v = try? URL(fileURLWithPath: p).resourceValues(forKeys: [.isSymbolicLinkKey]), v.isSymbolicLink != true else { continue }
                 jobs.append((parent, p))
             }

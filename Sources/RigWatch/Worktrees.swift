@@ -31,7 +31,7 @@ enum Worktrees {
 
     static func repos() -> [String] {
         var out: [String] = []
-        let skip: Set<String> = ["Library", "Applications", "Movies", "Music", "Pictures", "Public", "Desktop", "Downloads"]
+        let skip = Set(["Library", "Applications", "Public"] + privateHome)
         let roots = ((try? FileManager.default.contentsOfDirectory(atPath: Sh.home)) ?? [])
             .filter { !$0.hasPrefix(".") && !skip.contains($0) }.map { Sh.home + "/" + $0 }
         for root in roots {
@@ -122,12 +122,29 @@ enum Worktrees {
         return r.code == 0 ? "Removed \(w.path)." : "git refused: \(r.err.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))"
     }
 
+    /// Folders macOS guards with a privacy prompt. RigWatch never needs them, so they are never opened:
+    /// the home folders by path, and by name at any depth (du skips them with -I): iCloud Drive, other
+    /// cloud drives, the Photos, Music and TV libraries, and Apple's own app data (`com.apple.*` and
+    /// `group.com.apple.*` in Containers, Group Containers and Caches hold Photos and Music data).
+    static let privateHome = ["Desktop", "Documents", "Downloads", "Music", "Movies", "Pictures", "Library/Photos"]
+    static let privateNames = ["Mobile Documents", "CloudStorage", "*.photoslibrary", "*.musiclibrary", "*.tvlibrary", "*com.apple.*"]
+    static var duIgnore: [String] { privateNames.flatMap { ["-I", $0] } }
+    static func isPrivate(_ path: String) -> Bool {
+        let n = (path as NSString).lastPathComponent
+        return privateHome.contains { Sh.home + "/" + $0 == path } || privateNames.contains { fnmatch($0, n, 0) == 0 }
+    }
+    /// True for a folder that has a private home folder inside it (the home folder itself, `/Users`, `/`).
+    static func holdsPrivate(_ path: String) -> Bool {
+        privateHome.contains { (Sh.home + "/" + $0).hasPrefix(path == "/" ? "/" : path + "/") }
+    }
+
     /// At most three du at a time, each at macOS background priority (throttled CPU and disk I/O),
     /// so measuring sizes never competes with real work.
     private static let duSlots = DispatchSemaphore(value: 3)
     static func sizeKB(_ path: String) -> Int64? {
+        guard !isPrivate(path), !holdsPrivate(path) else { return nil }
         duSlots.wait(); defer { duSlots.signal() }
-        let r = Sh.run("/usr/sbin/taskpolicy", ["-b", "/usr/bin/du", "-sk", path], timeout: 600)
+        let r = Sh.run("/usr/sbin/taskpolicy", ["-b", "/usr/bin/du", "-sk"] + duIgnore + [path], timeout: 600)
         return r.out.split(separator: "\t").first.flatMap { Int64($0) }
     }
 }

@@ -40,6 +40,21 @@ enum Agent: String, CaseIterable {
         return nil
     }
 
+    /// The session id a process was started with: `opencode --session ID` / `-s ID`, `codex resume ID`.
+    static func sessionArg(_ args: [String]) -> String? {
+        let a = Array(args.dropFirst())
+        for (i, x) in a.enumerated() {
+            if x.hasPrefix("--session=") { return String(x.dropFirst(10)) }
+            if (x == "--session" || x == "-s" || x == "resume"), i + 1 < a.count, !a[i + 1].hasPrefix("-") { return a[i + 1] }
+        }
+        return nil
+    }
+
+    /// OpenCode 2's background server (`opencode serve`), shared by every OpenCode session.
+    static func isOpenCodeService(_ p: Proc) -> Bool {
+        (p.name == "opencode" || p.name == "opencode.exe") && p.args.dropFirst().contains("serve")
+    }
+
     /// Copies the command that resumes this session in a terminal, or nil if the tool has none.
     func resumeCommand(_ id: String) -> String? {
         switch self {
@@ -79,7 +94,7 @@ final class AgentIndex {
             while let x = stack.popLast() {
                 guard let q = byPid[x] else { continue }
                 l.cpu += q.cpu; l.mem += q.mem; l.procs += 1
-                for c in kids[x] ?? [] where kind[c] == nil || kind[c] == k { stack.append(c) }
+                for c in kids[x] ?? [] where (kind[c] == nil || kind[c] == k) && !(byPid[c].map(Agent.isOpenCodeService) ?? false) { stack.append(c) }
             }
             lives.append(l)
         }
@@ -96,9 +111,10 @@ final class AgentIndex {
                             host: l.via.map { "via \($0)" } ?? (l.agent.full ? "CLI" : "App"))
             s.agent = l.agent; s.cwd = l.cwd; s.started = started
             s.procCount = l.procs; s.cpu = l.cpu; s.mem = l.mem
-            // Full agents: the newest session of that tool in this folder is the one this process is running.
+            // Full agents: the session named on the command line, else the newest one of that tool in this folder.
             let rows = l.agent == .opencode ? ocRows : l.agent == .codex ? cxRows : []
-            if let cwd = l.cwd, let r = rows.filter({ $0.dir == cwd }).max(by: { $0.updated < $1.updated }) {
+            let named = Agent.sessionArg(l.root.args).flatMap { id in rows.first { $0.id == id } }
+            if let cwd = l.cwd, let r = named ?? rows.filter({ $0.dir == cwd }).max(by: { $0.updated < $1.updated }) {
                 s.id = r.id; s.title = r.title.isEmpty ? s.title : r.title; s.lastPrompt = r.prompt
                 s.project = (cwd as NSString).lastPathComponent
                 s.transcriptAge = Date().timeIntervalSince(r.updated)
@@ -133,7 +149,16 @@ enum OpenCodeStore {
         from session s where s.parent_id is null and s.time_archived is null
         order by s.time_updated desc limit 40;
         """
-        let r = Sh.run("/usr/bin/sqlite3", ["-readonly", "-json", db, sql], timeout: 5)
+        // OpenCode 2 moved sessions to `session_v2` and messages to `session_message`; 1.x databases have neither.
+        let v2 = Sh.run("/usr/bin/sqlite3", ["-readonly", db, "select 1 from sqlite_master where name = 'session_v2'"], timeout: 5).out.contains("1")
+        let sqlV2 = """
+        select s.id, s.title, s.directory, s.time_updated,
+          coalesce((select json_extract(m.data,'$.text') from session_message m
+                    where m.session_id = s.id and m.type = 'user' order by m.seq desc limit 1), '') as prompt
+        from session_v2 s where s.parent_id is null and s.time_archived is null
+        order by s.time_updated desc limit 40;
+        """
+        let r = Sh.run("/usr/bin/sqlite3", ["-readonly", "-json", db, v2 ? sqlV2 : sql], timeout: 5)
         let arr = (try? JSONSerialization.jsonObject(with: r.data) as? [[String: Any]]) ?? []
         let rows = arr.compactMap { d -> AgentRow? in
             guard let id = d["id"] as? String, let dir = d["directory"] as? String else { return nil }

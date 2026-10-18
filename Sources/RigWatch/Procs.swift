@@ -122,7 +122,7 @@ final class ProcSampler {
             return "Java"
         }
         if name == "claude" || path.contains("/claude-code/") { return "Claude Code sessions" }
-        if name == "opencode" { return "OpenCode" }
+        if name == "opencode" || name == "opencode.exe" { return "OpenCode" }
         if name == "codex" { return "Codex" }
         if path.contains("Xcode.app") || ["xcodebuild", "swift-frontend", "clang", "ld", "SourceKitService"].contains(name) { return "Xcode / Swift" }
         if let r = path.range(of: ".app/") {
