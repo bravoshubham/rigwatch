@@ -53,8 +53,22 @@ RigWatch groups everything by **who started it** and shows it as one picture.
 
 ## Install
 
-Requires **macOS 14 (Sonoma) or later** on Apple silicon (Intel is untested), and the Xcode Command Line Tools
-(`xcode-select --install`).
+Requires **macOS 14 (Sonoma) or later** on Apple silicon (Intel is untested).
+
+### With Homebrew
+
+```bash
+brew install bravoshubham/tap/rigwatch
+rigwatch
+```
+
+Homebrew builds RigWatch on your Mac from source (about 20 seconds), so macOS opens it without a
+Gatekeeper warning. Update with `brew upgrade`. To see it in your Applications folder too, run the
+`ln -sfn …` line Homebrew prints after installing.
+
+### From source
+
+Needs the Xcode Command Line Tools (`xcode-select --install`).
 
 ```bash
 git clone https://github.com/bravoshubham/rigwatch.git
@@ -76,7 +90,8 @@ Release builds are not notarized by Apple, so macOS blocks the first launch. Eit
 ### Try it without your own data
 
 ```bash
-~/Applications/RigWatch.app/Contents/MacOS/RigWatch -demo
+rigwatch -demo                                               # Homebrew install
+~/Applications/RigWatch.app/Contents/MacOS/RigWatch -demo    # built from source
 ```
 
 Demo mode fills every page with made-up sessions, devices and folders. Nothing is sampled, scanned
