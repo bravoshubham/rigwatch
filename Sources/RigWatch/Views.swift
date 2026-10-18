@@ -232,6 +232,8 @@ struct OverviewView: View {
                 SectionTitle(title: "What is using the machine", aspect: .gpu)
                 ProcessDie().frame(height: 450)
 
+                SpikeTimeline()
+
                 SectionTitle(title: "Instruments", aspect: .cpu)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 14)], spacing: 14) {
                     Gauge(aspect: .cpu, label: "Processor", value: s.cpu / 100, big: "\(Int(s.cpu))", unit: "%", color: Heat.ratio(s.cpu / 100), open: { m.top = .cpu }) {

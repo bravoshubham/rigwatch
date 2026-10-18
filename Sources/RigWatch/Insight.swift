@@ -275,3 +275,94 @@ struct HotBanner: View {
         .overlay(Brackets().stroke(hot.readable(scheme), lineWidth: 1.5))
     }
 }
+
+// MARK: spike history
+
+/// CPU over the last 15 minutes, a bar per sample. Spikes (CPU >= 70% or memory pressure up) stand
+/// out; click any bar to see what was on top at that moment.
+struct SpikeTimeline: View {
+    @ObservedObject private var m = Monitor.shared
+    @Environment(\.colorScheme) private var scheme
+    @State private var picked: UUID?
+    static let clock: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f }()
+
+    var body: some View {
+        let h = m.history
+        let spikes = h.filter(\.spike)
+        let sel = h.first { $0.id == picked } ?? spikes.last { !$0.topCPU.isEmpty } ?? h.last
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                SectionTitle(title: "Last 15 minutes", aspect: .cpu, count: spikes.count)
+                Text(spikes.isEmpty ? "no spikes" : "spikes: CPU ≥ 70% or memory pressure up").hudLabel().fixedSize()
+            }
+            Panel(aspect: .cpu, padding: 12) {
+                VStack(alignment: .leading, spacing: 10) {
+                    GeometryReader { g in
+                        let w = g.size.width, ht = g.size.height
+                        let end = Date(), start = end.addingTimeInterval(-Moment.window)
+                        let x = { (d: Date) in CGFloat(d.timeIntervalSince(start) / Moment.window) * w }
+                        let bar = max(2, w / 300)
+                        Canvas { ctx, size in
+                            var line = Path(); let y70 = ht * 0.3
+                            for xx in stride(from: 0, to: w, by: 8) { line.move(to: CGPoint(x: xx, y: y70)); line.addLine(to: CGPoint(x: xx + 4, y: y70)) }
+                            ctx.stroke(line, with: .color(Color(hex: 0xFF8A3D).opacity(0.45)), lineWidth: 0.8)
+                            for mo in h {
+                                let bh = max(1.5, CGFloat(min(100, mo.cpu)) / 100 * (ht - 6))
+                                let r = CGRect(x: x(mo.at) - bar / 2, y: ht - bh, width: bar, height: bh)
+                                ctx.fill(Path(r), with: .color(Heat.ratio(mo.cpu / 100).opacity(mo.spike ? 0.95 : 0.4)))
+                                if mo.pressure >= 2 { ctx.fill(Path(CGRect(x: r.minX, y: 0, width: bar, height: 3)), with: .color(Views.pressureColor(mo.pressure))) }
+                                if mo.id == sel?.id { ctx.stroke(Path(CGRect(x: r.minX - 2, y: 0, width: bar + 4, height: ht)), with: .color(.primary.opacity(0.7)), lineWidth: 1) }
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture(coordinateSpace: .local) { pt in
+                            picked = h.min { abs(x($0.at) - pt.x) < abs(x($1.at) - pt.x) }?.id
+                        }
+                    }
+                    .frame(height: 64)
+                    HStack {
+                        Text("15 min ago").hudLabel(); Spacer()
+                        Text("dashed line = 70% · bar = CPU of the whole machine · top edge = memory pressure").hudLabel(); Spacer()
+                        Text("now").hudLabel()
+                    }
+                    if let sel { detail(sel) } else { Text("Collecting: the first samples arrive in a few seconds.").hudLabel() }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder func detail(_ mo: Moment) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Text(Self.clock.string(from: mo.at)).font(.system(size: 13, weight: .semibold, design: .monospaced))
+                Text(Fmt.ago(mo.at)).hudLabel()
+                Chip(text: "CPU \(Int(mo.cpu))%", color: Heat.ratio(mo.cpu / 100), filled: mo.cpu >= Moment.hotCPU)
+                Chip(text: "MEM \(Fmt.bytes(mo.memUsed))", color: Aspect.memory.color)
+                Chip(text: Views.pressureName(mo.pressure).uppercased(), color: Views.pressureColor(mo.pressure), filled: mo.pressure >= 2)
+                if mo.spike { Chip(text: "SPIKE", icon: "flame.fill", color: Color(hex: 0xFF8A3D)) }
+            }
+            if mo.topCPU.isEmpty && mo.topMem.isEmpty {
+                Text(mo.spike ? "Processes were not listed at this moment: with the window hidden they are listed every 10 s during a spike." : "Processes were not listed at this moment: the window was hidden and the machine was quiet.").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
+            } else {
+                HStack(alignment: .top, spacing: 18) {
+                    column("On top by CPU", mo.topCPU, byCPU: true)
+                    column("On top by memory", mo.topMem, byCPU: false)
+                }
+            }
+        }
+    }
+
+    func column(_ title: String, _ list: [Culprit], byCPU: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).hudLabel((byCPU ? Aspect.cpu : Aspect.memory).color.readable(scheme))
+            ForEach(list, id: \.self) { c in
+                HStack(spacing: 7) {
+                    Text(byCPU ? Fmt.cpu(c.cpu) : Fmt.bytes(c.mem)).font(.system(size: 11, weight: .semibold, design: .monospaced)).monospacedDigit().frame(width: 70, alignment: .trailing)
+                    Text(c.label).font(.system(size: 11.5, weight: .medium)).lineLimit(1)
+                    Text([c.group == c.name ? nil : c.group, c.owner.isEmpty ? nil : c.owner].compactMap { $0 }.joined(separator: " · "))
+                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}

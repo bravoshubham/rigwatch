@@ -82,7 +82,9 @@ final class Monitor: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.windows.first { $0.canBecomeMain }?.center() }
             if let j = CommandLine.arguments.firstIndex(of: "-snap"), j + 1 < CommandLine.arguments.count {
                 let out = CommandLine.arguments[j + 1]
-                DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
+                // -snapdelay N: snapshot after N s, with the window's real visibility (12 s and always visible otherwise).
+                let delay = CommandLine.arguments.firstIndex(of: "-snapdelay").flatMap { Double(CommandLine.arguments[$0 + 1]) } ?? 12
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                     guard let v = NSApp.windows.first(where: { $0.canBecomeMain })?.contentView?.superview,
                           let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
                     v.cacheDisplay(in: v.bounds, to: rep)
@@ -95,7 +97,7 @@ final class Monitor: ObservableObject {
         DispatchQueue.main.async { self.heartbeat(force: true) }   // NSApp does not exist yet during App.init
     }
 
-    private let snapshotting = CommandLine.arguments.contains("-snap")
+    private let snapshotting = CommandLine.arguments.contains("-snap") && !CommandLine.arguments.contains("-snapdelay")
     var windowVisible: Bool {
         if snapshotting { return true }
         guard let app = NSApp as NSApplication? else { return false }
