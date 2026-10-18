@@ -159,7 +159,7 @@ nothing else on your Mac.
   that are new or already listening (plus a sweep every 30 seconds).
 - Disk sizes use `du` at macOS background priority, at most three at a time. The automatic rescan
   runs at most every six hours; **Rescan** runs one now.
-- The menu bar shows CPU and memory at a glance.
+- The menu bar shows CPU, GPU and memory at a glance.
 
 ## Safety and privacy
 

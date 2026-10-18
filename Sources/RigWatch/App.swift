@@ -20,7 +20,7 @@ struct RigWatchApp: App {
         MenuBarExtra {
             MenuView()
         } label: {
-            Text("CPU \(Int(m.sys.cpu))% · \(Fmt.bytes(m.sys.memUsed))")
+            Text("CPU \(Int(m.sys.cpu))% · GPU \(m.sys.gpu)% · \(Fmt.bytes(m.sys.memUsed))")
         }
     }
 }
