@@ -335,7 +335,8 @@ struct ProcessDie: View {
         // Top level: every group, plus the system's own pieces.
         var b = m.groups.map(groupBlock).filter { $0.bytes > 0 }.sorted { $0.bytes > $1.bytes }
         if !byCPU {
-            b.append(.init(id: "wired", label: "Kernel & drivers", bytes: Int64(s.memWired), color: Color(hex: 0xFFB020), path: nil, kind: 1, value: Fmt.bytes(s.memWired), caption: "wired: can't be paged out"))
+            b.append(.init(id: "wired", label: "Kernel & drivers", bytes: Int64(s.memKernel), color: Color(hex: 0xFFB020), path: nil, kind: 1, value: Fmt.bytes(s.memKernel),
+                           caption: s.gpuMem >= 1 << 30 ? "wired, less \(Fmt.bytes(s.gpuMem)) of GPU memory" : "wired: can't be paged out"))
         }
         return (b, "")
     }
@@ -354,7 +355,7 @@ struct ProcessDie: View {
             let rest = all.filter { $0.kind == 0 && !shownIds.contains($0.id) }.map { String($0.id.dropFirst(2)) }
             let groupsLevel = key.isEmpty || key.hasPrefix("groups:")
             path.append((groupsLevel ? "groups:" : "procs:") + rest.joined(separator: Self.sep))
-        case "wired": m.toast = "Kernel & drivers (wired memory) can't be broken down: macOS doesn't show apps what's inside it."
+        case "wired": m.toast = "Kernel & drivers: wired memory less the GPU's \(Fmt.bytes(m.sys.gpuMem)). GPU memory is counted in the app that allocated it (a local model's weights are in its own block). The rest can't be broken down: macOS doesn't show apps what's inside it."
         default:
             if blk.id.hasPrefix("g:") { path.append(blk.id) }
             else if blk.id.hasPrefix("p:") { m.procSearch = String(blk.id.dropFirst(2)); m.tab = .processes }
@@ -412,7 +413,7 @@ struct ProcessDie: View {
                                     Text("pid \(p.pid) · \(m.owner(p))").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
                                     Spacer(minLength: 0)
                                 }
-                                if let e = Explain.of(p.name) { ExplainLine(e: e).padding(.leading, 84) }
+                                if let e = Explain.of(p) { ExplainLine(e: e).padding(.leading, 84) }
                             }
                             .background(Rectangle().fill(hover == b.id ? Aspect.gpu.color.opacity(0.08) : .clear))
                             .onHover { hover = $0 ? b.id : (hover == b.id ? nil : hover) }
@@ -445,7 +446,12 @@ struct AvailableBar: View {
                     HStack(spacing: 4) { Rectangle().fill(p.2).frame(width: 7, height: 7); Text("\(p.0) \(Fmt.bytes(p.1))").hudLabel() }
                 }
                 Spacer()
-                Text("not on the map: macOS gives it to apps as soon as they need it").hudLabel().lineLimit(1)
+                if s.gpuMem >= 1 << 30 {
+                    Text("GPU memory \(Fmt.bytes(s.gpuMem)): in the blocks of the apps using it").hudLabel(Aspect.gpu.color.readable(scheme)).lineLimit(1)
+                        .help("GPU memory in use is wired. Your own processes' GPU buffers are part of their footprint, so they are counted in their blocks and taken out of Kernel & drivers.")
+                } else {
+                    Text("not on the map: macOS gives it to apps as soon as they need it").hudLabel().lineLimit(1)
+                }
             }
             GeometryReader { g in
                 HStack(spacing: 1) {
@@ -962,7 +968,10 @@ struct MemoryView: View {
                                 }
                             }
                         }.frame(height: 44)
-                        FlowChips { ForEach(parts, id: \.0) { p in Chip(text: "\(p.0.uppercased()) \(Fmt.bytes(p.1))", color: p.2) } }
+                        FlowChips {
+                            ForEach(parts, id: \.0) { p in Chip(text: "\(p.0.uppercased()) \(Fmt.bytes(p.1))", color: p.2) }
+                            if s.gpuMem > 0 { Chip(text: "GPU IN USE \(Fmt.bytes(s.gpuMem)) · PART OF WIRED", icon: Aspect.gpu.icon, color: Aspect.gpu.color).help("GPU memory in use is wired. A local model's weights are GPU memory: they are in wired and in the footprint of the process that loaded them.") }
+                        }
                     }
                 }
                 FreeList()

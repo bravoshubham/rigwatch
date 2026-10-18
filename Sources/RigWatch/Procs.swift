@@ -123,6 +123,7 @@ final class ProcSampler {
             if path.contains("Android Studio") { return "Android Studio" }
             return "Java"
         }
+        if isLocalModel(p) { return "Local models" }
         if name == "claude" || path.contains("/claude-code/") { return "Claude Code sessions" }
         if name == "opencode" || name == "opencode.exe" { return "OpenCode" }
         if name == "codex" { return "Codex" }
@@ -135,6 +136,15 @@ final class ProcSampler {
         if p.uid == 0 { return "System (root)" }
         if path.hasPrefix("/System/") || path.hasPrefix("/usr/libexec/") || path.hasPrefix("/usr/sbin/") { return "macOS services" }
         return name
+    }
+
+    /// A local AI model server or run: llama.cpp, Ollama, MLX (mlx_lm, oMLX), vLLM. LM Studio stays its own app.
+    static func isLocalModel(_ p: Proc) -> Bool {
+        let n = p.name
+        if ["llama-server", "llama-cli", "ollama", "ollama_llama_server", "mlx_lm.server", "omlx"].contains(n) { return true }
+        guard n.lowercased().hasPrefix("python") else { return false }
+        let a = p.args.dropFirst().joined(separator: " ")
+        return ["mlx_lm", "mlx-lm", "omlx", "vllm", "llama_cpp"].contains { a.contains($0) }
     }
 
     /// Start time (mach abs) of one of our processes, to tell a pid apart from a reused one.

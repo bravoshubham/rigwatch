@@ -93,6 +93,7 @@ extension Monitor {
             return devices.first { $0.pid == p.pid }.map { .shutDown($0) } ?? .openDevices
         }
         if p.group == "Android emulators" || p.group == "iOS simulators" { return .openDevices }
+        if p.group == "macOS services" { return nil }   // explained, not quit: quitting a WebKit page or a VM from here would surprise
         if p.path.contains(".app/"), appRunning(p.group) { return .quitApp(p.group) }
         if Safety.processBlock(p) == nil { return .quit(p) }
         return nil
@@ -226,12 +227,12 @@ struct TopSheet: View {
                 Button { m.run(f) } label: { Label(f.label, systemImage: f.icon) }
                     .buttonStyle(HUDButton(color: { if case .openDevices = f { Aspect.android.color } else { Color(hex: 0xFF4D5E) } }()))
             } else {
-                Text(Safety.processBlock(p).map { "leave: \($0)" } ?? "").font(.system(size: 9.5, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1).fixedSize()
+                Text(Safety.processBlock(p).map { "leave: \($0)" } ?? "part of macOS").font(.system(size: 9.5, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1).fixedSize()
             }
             Button { m.top = nil; m.procSearch = "\(p.pid)"; m.tab = .processes } label: { Image(systemName: "magnifyingglass") }
                 .buttonStyle(HUDButton(color: Aspect.process.color)).help("Show in Processes")
         }
-        if let e = Explain.of(p.name) { ExplainLine(e: e).padding(.leading, 40) }
+        if let e = Explain.of(p) { ExplainLine(e: e).padding(.leading, 40) }
         }
     }
 }

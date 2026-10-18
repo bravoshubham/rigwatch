@@ -46,6 +46,7 @@ enum Aspect: CaseIterable {
         case "iOS simulators", "Xcode / Swift": .ios
         case "Claude Code sessions", "Claude": .claude
         case "Gradle", "Kotlin daemon", "Java", "Android Studio": .cpu
+        case "Local models": .gpu
         default: .process
         }
     }

@@ -14,6 +14,10 @@ struct SysSnapshot {
     var load: (Double, Double, Double) = (0, 0, 0)
     var memTotal: UInt64 = 0, memApp: UInt64 = 0, memWired: UInt64 = 0, memCompressed: UInt64 = 0, memCached: UInt64 = 0, memFree: UInt64 = 0, memPurgeable: UInt64 = 0
     var memUsed: UInt64 { memApp + memWired + memCompressed }
+    /// Wired memory without the GPU's share. GPU memory in use is wired, and the same buffers are in the
+    /// physical footprint of the process that allocated them (measured with `footprint` on an MLX
+    /// process), so it is shown there and taken out here to avoid counting it twice.
+    var memKernel: UInt64 { memWired - min(memWired, gpuMem) }
     var pressure: Int32 = 1             // 1 normal, 2 warning, 4 critical
     var swapUsed: UInt64 = 0, swapTotal: UInt64 = 0
     var gpu: Int = 0, gpuMem: UInt64 = 0, gpuModel = ""

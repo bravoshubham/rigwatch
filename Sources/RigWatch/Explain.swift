@@ -68,4 +68,10 @@ enum Explain {
     }()
 
     static func of(_ name: String) -> Explanation? { table[name] }
+    static func of(_ p: Proc) -> Explanation? { p.group == "Local models" ? localModel : table[p.name] }
+
+    static let localModel = Explanation(
+        what: "A local AI model. Its weights sit in GPU memory, which macOS counts in this process's memory and as wired memory.",
+        why: "It keeps that memory for as long as the model stays loaded, even when idle; CPU and GPU are busy while it answers.",
+        todo: "Unload the model when you aren't using it (ollama stop <model>, your server's unload, or quit the server).")
 }
