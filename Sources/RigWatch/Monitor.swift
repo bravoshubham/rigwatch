@@ -71,6 +71,7 @@ final class Monitor: ObservableObject {
     private var lastFull = Date.distantPast
     private var lastWorktrees = Date.distantPast
     private var lastMentions = Date.distantPast
+    private var lastDevices = Date.distantPast
     private var timer: Timer?
 
     init() {
@@ -133,7 +134,10 @@ final class Monitor: ObservableObject {
         }
         running = true
         let tab = self.tab
-        let wantDevices = visible && (tab == .devices || tab == .sessions)
+        // Overview and Memory list idle emulators under "What you can free": a light device check, at most once a minute.
+        let devicesForFree = (tab == .overview || tab == .memory) && emulatorCount + simulatorCount > 0 && Date().timeIntervalSince(lastDevices) > 60
+        let wantDevices = visible && (tab == .devices || tab == .sessions || devicesForFree)
+        if wantDevices { lastDevices = Date() }
         let wantMentions = visible && (tab == .devices || tab == .sessions) && Date().timeIntervalSince(lastMentions) > 30
         let wantWorktrees = worktreesNow || (visible && (tab == .worktrees || tab == .sessions || (tab == .overview && worktrees.isEmpty)) && (Date().timeIntervalSince(lastWorktrees) > 60 || worktrees.isEmpty))
         if wantMentions { lastMentions = Date() }

@@ -234,6 +234,8 @@ struct OverviewView: View {
 
                 SpikeTimeline()
 
+                FreeList()
+
                 SectionTitle(title: "Instruments", aspect: .cpu)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 14)], spacing: 14) {
                     Gauge(aspect: .cpu, label: "Processor", value: s.cpu / 100, big: "\(Int(s.cpu))", unit: "%", color: Heat.ratio(s.cpu / 100), open: { m.top = .cpu }) {
@@ -963,6 +965,7 @@ struct MemoryView: View {
                         FlowChips { ForEach(parts, id: \.0) { p in Chip(text: "\(p.0.uppercased()) \(Fmt.bytes(p.1))", color: p.2) } }
                     }
                 }
+                FreeList()
                 SectionTitle(title: "Consumers", aspect: .memory, count: m.groups.count)
                 Panel(aspect: .memory) {
                     VStack(spacing: 11) {

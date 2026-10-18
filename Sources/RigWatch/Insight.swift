@@ -380,3 +380,93 @@ struct ExplainLine: View {
             .help("Why it gets busy: " + e.why)
     }
 }
+
+// MARK: what you can free
+
+/// One thing that can be closed to give memory back, with the action that does it.
+struct Freeable: Identifiable {
+    let id: String
+    let kind: String      // "Idle simulator", "Dormant session", …
+    let name: String
+    let detail: String
+    let bytes: UInt64
+    let aspect: Aspect
+    let action: String
+    let run: () -> Void
+}
+
+extension Monitor {
+    /// Concrete things to close, biggest first: idle emulators and simulators, dormant agent sessions,
+    /// dev servers whose session is gone, and big apps. Each uses the existing confirmation.
+    var freeable: [Freeable] {
+        var out: [Freeable] = []
+        for d in devices where d.kind != .phone && d.mem > 0 {
+            let users = ([d.launchedBy].compactMap { $0 } + Array(d.recentUsers.keys)).compactMap { session($0) }
+            guard !users.contains(where: \.isWorking) else { continue }
+            out.append(.init(id: "dev:" + d.id, kind: d.kind == .simulator ? "Idle simulator" : "Idle emulator", name: d.name,
+                             detail: users.isEmpty ? "no agent session is using it" : "last used by \(users[0].title)",
+                             bytes: d.mem, aspect: d.kind == .simulator ? .ios : .android, action: "Shut down") { [weak self] in self?.confirmShutDown(d) })
+        }
+        if devices.isEmpty && emulatorCount + simulatorCount > 0 {
+            let mem = groups.filter { $0.name == "Android emulators" || $0.name == "iOS simulators" }.reduce(UInt64(0)) { $0 + $1.mem }
+            out.append(.init(id: "dev:all", kind: "Emulators & simulators", name: "\(emulatorCount + simulatorCount) running", detail: "open the page to see which are idle",
+                             bytes: mem, aspect: .android, action: "Open") { [weak self] in self?.tab = .devices; self?.refresh() })
+        }
+        for s in sessions where s.live && s.status == "Dormant" && (Demo.on ? s.host != "Desktop" : !s.pids.isEmpty) {
+            let own = Demo.on ? s.mem / 3 : s.pids.keys.compactMap { procIndex[$0]?.mem }.reduce(0, +)
+            guard own > 0 else { continue }
+            out.append(.init(id: "ses:" + s.id, kind: "Dormant session", name: s.title, detail: "\(s.agent.rawValue) · last active \(Fmt.age(s.transcriptAge))",
+                             bytes: own, aspect: .claude, action: "Quit session") { [weak self] in self?.confirmQuitSession(s) })
+        }
+        for d in servers where d.orphaned || (d.session != nil && !(session(d.session)?.live ?? false)) {
+            out.append(.init(id: "srv:" + d.id, kind: d.orphaned ? "Orphaned dev server" : "Dev server, session ended", name: d.label,
+                             detail: d.cwd.map { "in " + Views.tilde($0) } ?? d.name, bytes: d.mem, aspect: .server, action: "Stop") { [weak self] in self?.confirmStop(d) })
+        }
+        let live = Set(sessions.filter(\.live).map(\.id))
+        for g in groups where g.mem >= 1 << 30 && appRunning(g.name) {
+            let members = procs.filter { $0.group == g.name }
+            // Apps only, and never one an agent session is running in.
+            guard members.contains(where: { $0.path.contains(".app/") }), !members.contains(where: { sessionId($0).map(live.contains) ?? false }) else { continue }
+            out.append(.init(id: "app:" + g.name, kind: "App", name: g.name, detail: "\(g.count) process\(g.count == 1 ? "" : "es") · CPU \(Fmt.cpu(g.cpu))",
+                             bytes: g.mem, aspect: Aspect.forGroup(g.name), action: "Quit app") { [weak self] in self?.confirmQuitApp(g.name) })
+        }
+        return out.sorted { $0.bytes > $1.bytes }
+    }
+}
+
+/// "You could free ~X GB": the freeable list with one button per row.
+struct FreeList: View {
+    @ObservedObject private var m = Monitor.shared
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        let items = m.freeable
+        let total = items.reduce(UInt64(0)) { $0 + $1.bytes }
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                SectionTitle(title: "What you can free", aspect: .memory, count: items.count)
+                if total > 0 { Text("you could free ~\(Fmt.bytes(total))").font(.system(size: 11, weight: .semibold, design: .monospaced)).foregroundStyle(Color(hex: 0x3DDC97).readable(scheme)).fixedSize() }
+            }
+            if items.isEmpty {
+                Text("Nothing obvious: no idle emulators, dormant sessions, abandoned dev servers or apps over 1 GB.").hudLabel().padding(.leading, 14)
+            } else {
+                Panel(aspect: .memory, padding: 12) {
+                    VStack(alignment: .leading, spacing: 9) {
+                        ForEach(items) { f in
+                            HStack(spacing: 10) {
+                                Image(systemName: f.aspect.icon).font(.system(size: 11)).foregroundStyle(f.aspect.color.readable(scheme)).frame(width: 16)
+                                Text(Fmt.bytes(f.bytes)).font(.system(size: 12, weight: .semibold, design: .monospaced)).monospacedDigit().frame(width: 80, alignment: .trailing)
+                                Text(f.kind.uppercased()).hudLabel(f.aspect.color.readable(scheme)).fixedSize()
+                                Text(f.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                Text(f.detail).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                                Spacer(minLength: 8)
+                                Button(action: f.run) { Text(f.action) }.buttonStyle(HUDButton(color: f.action == "Open" ? f.aspect.color : Color(hex: 0xFF4D5E)))
+                            }
+                        }
+                        Text("Sizes are what each one uses now; memory shared between processes is counted in each, so the total is approximate. Every action asks first.")
+                            .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+}
