@@ -30,15 +30,20 @@ enum Worktrees {
     static let uuidRe = #"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"#
 
     static func repos() -> [String] {
-        var out: [String] = []
+        var out: [String] = [], seen = Set<String>()
+        let fm = FileManager.default
         let skip = Set(["Library", "Applications", "Public"] + privateHome)
-        let roots = ((try? FileManager.default.contentsOfDirectory(atPath: Sh.home)) ?? [])
+        let roots = ((try? fm.contentsOfDirectory(atPath: Sh.home)) ?? [])
             .filter { !$0.hasPrefix(".") && !skip.contains($0) }.map { Sh.home + "/" + $0 }
         for root in roots {
-            for d in (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? [] {
+            for d in (try? fm.contentsOfDirectory(atPath: root)) ?? [] {
                 var dir: ObjCBool = false
                 let p = "\(root)/\(d)"
-                if FileManager.default.fileExists(atPath: p + "/.git", isDirectory: &dir), dir.boolValue { out.append(p) }
+                // A symlink to a repo is the same repo under another name: listing it again would show
+                // its checkout twice, under the link's name.
+                if (try? fm.destinationOfSymbolicLink(atPath: p)) != nil { continue }
+                let real = URL(fileURLWithPath: p).resolvingSymlinksInPath().path
+                if fm.fileExists(atPath: p + "/.git", isDirectory: &dir), dir.boolValue, seen.insert(real).inserted { out.append(p) }
             }
         }
         return out.sorted()

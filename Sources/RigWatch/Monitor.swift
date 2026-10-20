@@ -467,10 +467,16 @@ final class Monitor: ObservableObject {
     }
 
     func confirmRemove(_ ws: [Worktree]) {
+        let mains = ws.filter(\.isMain).map { ($0.path as NSString).lastPathComponent }
         let ws = ws.filter { !$0.isMain }
-        guard !ws.isEmpty else { toast = "The main checkout is never removed."; return }
-        busy.insert("check")
+        let mainNote = mains.isEmpty ? "" : "\(mains.joined(separator: ", ")) " + (mains.count == 1 ? "is a repository's main checkout" : "are main checkouts")
+            + ": the repository itself, not a worktree. RigWatch never deletes a main checkout; delete the folder yourself in Finder if you really mean to, after checking nothing in it is unsaved."
+        guard !ws.isEmpty else {
+            pending = Pending(title: "Not a worktree", message: mainNote, button: "OK", blocked: true) { "" }
+            return
+        }
         if Demo.on { toast = "Demo mode: nothing was changed."; return }
+        busy.insert("check")
         let working = Set(sessions.filter(\.isWorking).map(\.id))
         q.async {
             let checks = ws.map { ($0, Worktrees.check($0, sessionWorking: $0.session.map(working.contains) ?? false)) }
@@ -480,6 +486,7 @@ final class Monitor: ObservableObject {
                 var msg = ""
                 if !ok.isEmpty { msg += "Safe to remove (\(ok.count)):\n" + ok.prefix(12).map { "• \($0.0.path.replacingOccurrences(of: Sh.home, with: "~"))" }.joined(separator: "\n") + (ok.count > 12 ? "\n• …" : "") }
                 if !bad.isEmpty { msg += (msg.isEmpty ? "" : "\n\n") + "Kept — would lose something (\(bad.count)):\n" + bad.prefix(8).map { "• \(($0.0.path as NSString).lastPathComponent): \($0.1.reasons.joined(separator: " "))" }.joined(separator: "\n") }
+                if !mainNote.isEmpty { msg += "\n\nSkipped: " + mainNote }
                 self.pending = Pending(title: ok.isEmpty ? "Nothing here is safe to remove" : "Remove \(ok.count) worktree(s)?", message: msg,
                                        button: ok.isEmpty ? "OK" : "Remove \(ok.count)", blocked: ok.isEmpty) {
                     ok.map { Worktrees.remove($0.0, force: $0.1.force) }.last.map { ok.count > 1 ? "Removed \(ok.count) worktrees." : $0 } ?? ""
