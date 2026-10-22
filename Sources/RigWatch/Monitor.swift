@@ -3,12 +3,12 @@ import Foundation
 
 enum Page: String, CaseIterable, Identifiable {
     case overview = "Overview", devices = "Emulators & Simulators", sessions = "Agent Sessions", servers = "Dev Servers",
-         processes = "Processes", memory = "Memory", worktrees = "Worktrees", disk = "Disk"
+         processes = "Processes", memory = "Memory", worktrees = "Worktrees", disk = "Disk", rules = "Rules"
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .overview: "gauge.with.dots.needle.33percent"; case .devices: "iphone.gen3"; case .sessions: "bubble.left.and.text.bubble.right"; case .servers: "server.rack"
-        case .processes: "cpu"; case .memory: "memorychip"; case .worktrees: "arrow.triangle.branch"; case .disk: "internaldrive"
+        case .processes: "cpu"; case .memory: "memorychip"; case .worktrees: "arrow.triangle.branch"; case .disk: "internaldrive"; case .rules: "slider.horizontal.3"
         }
     }
 }

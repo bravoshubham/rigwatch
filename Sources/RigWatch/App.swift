@@ -1,7 +1,6 @@
 import SwiftUI
 
-@main
-struct RigWatchApp: App {
+struct RigWatchApp: App {   // started from main.swift
     @ObservedObject private var m: Monitor
     @AppStorage("appearance") private var appearance = "system"
 

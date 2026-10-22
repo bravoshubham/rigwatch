@@ -50,6 +50,7 @@ Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups eve
 | **Memory** | Where the RAM went: apps, wired, compressed, file cache, swap and pressure, and **what you can free**: idle emulators and simulators, dormant agent sessions, abandoned dev servers, a loaded local model and big apps, each with its size and one button, adding up to "you could free ~X GB". GPU memory (a local model's weights) is counted once, in the process that holds it, not again as Kernel & drivers. |
 | **Worktrees** | Every `git worktree` under your home folders, which session made it, how much disk it takes, whether anything is using it, and a remove that refuses to lose uncommitted or unpushed work. |
 | **Disk** | The whole drive as a chip-die map of folders. Click into any folder; right-click to show it in Finder. |
+| **Rules** | Keeps the Mac usable while many agent sessions build at once: a machine-wide build queue, physical devices before emulators, and a clean-up of idle emulators, simulators, worktrees and DerivedData. Off until you turn it on. See [Rules](#rules-one-mac-many-agents). |
 
 <p align="center">
   <img src="docs/screenshots/sessions-dark.png" width="49%" alt="Agent sessions">
@@ -71,6 +72,45 @@ Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups eve
   <img src="docs/screenshots/servers-light.png" width="49%" alt="Dev servers, light theme">
   <img src="docs/screenshots/disk-light.png" width="49%" alt="Disk, light theme">
 </p>
+
+## Rules: one Mac, many agents
+
+Agent sessions don't know about each other. Five of them each start a Gradle build, boot an emulator
+"to test" with a phone already plugged in, and create a worktree with its own 12 GB `node_modules`,
+and the Mac is at load 300 with swap full. The Rules page fixes that, for every Claude Code session
+at once, desktop app and terminal alike:
+
+- **Queue heavy builds.** Gradle, `xcodebuild` and npm, yarn or pod installs wait for a free slot
+  (2 at once by default, fewer under memory pressure), first come first served, at a priority that
+  keeps the rest of the Mac responsive, with a thread cap each. A session whose build has to wait gets
+  it moved to the background and keeps working.
+- **Physical devices first.** Booting an emulator or simulator is refused while a phone of that kind
+  is connected or another virtual one is already running. `RIGWATCH_VIRTUAL=1` in front of the command
+  lets it through.
+- **Shut down idle emulators and simulators** after 30 minutes with no command or device tool naming
+  them (10 with a phone connected). Pin one to keep it.
+- **Clean up idle worktrees** untouched for a day: a clean one is removed (its branch and commits
+  stay); one with uncommitted work or commits on no remote keeps its source and loses only build output.
+  `node_modules` is kept aside first and cloned back (APFS, seconds, no extra disk) into the next
+  worktree with the same lockfile.
+- **Delete orphaned DerivedData** whose project no longer exists.
+
+**Turn on** adds a `PreToolUse` hook to `~/.claude/settings.json` (the old file is kept as
+`settings.json.rigwatch-backup`) and a LaunchAgent that runs the clean-up every 10 minutes; for its
+first hour the clean-up only reports. **Preview** shows what it would do, **Pause** stops everything.
+The same commands work from a terminal:
+
+```text
+RigWatch run [--kind K] -- CMD...   run CMD once a build slot is free
+RigWatch reap [--apply]             the clean-up (reports only without --apply)
+RigWatch wt REPO BRANCH [BASE]      new worktree beside the repo, in .wt/, with node_modules cloned in
+RigWatch pin|unpin ID               keep an emulator or simulator from the clean-up
+RigWatch status                     what is running, queued and booted
+RigWatch install|uninstall          turn the rules on or off
+```
+
+(`RigWatch` is `~/Applications/RigWatch.app/Contents/MacOS/RigWatch`, or `rigwatch` with Homebrew.)
+The hook adds about 30 ms to a tool call. Sessions of other agents are not routed through it yet.
 
 ## Install
 
@@ -131,7 +171,8 @@ or closed while it is on. Every screenshot above was taken in it.
 
 ### Uninstall
 
-Quit RigWatch, then remove the app:
+If you turned the rules on, turn them off first (Rules page → Turn off, or `RigWatch uninstall`).
+Then quit RigWatch and remove the app:
 
 ```bash
 brew uninstall rigwatch
@@ -149,7 +190,13 @@ Remove its settings (window position, saved folder sizes, which session started 
 defaults delete dev.rigwatch.RigWatch
 ```
 
-Built from source instead? Skip `brew uninstall`; the other two steps are the same. RigWatch keeps
+Remove the Rules state (settings, build queue, clean-up log and the `node_modules` cache):
+
+```bash
+rm -rf ~/Library/Application\ Support/RigWatch
+```
+
+Built from source instead? Skip `brew uninstall`; the other steps are the same. RigWatch keeps
 nothing else on your Mac.
 
 ## Light on the machine it watches
@@ -185,6 +232,9 @@ nothing else on your Mac.
   process id, session id and session title for each running server, and drop them when it exits.
 - **Agent session files are read, never written**: Claude Code transcripts in `~/.claude/projects`,
   OpenCode's database (opened read-only), Codex's rollouts in `~/.codex/sessions`.
+- **The Rules clean-up never removes work.** A worktree is removed only when it is clean, has no
+  commit missing from every remote, no process inside and no untracked file beyond build output; it
+  is checked again right before removal. Main checkouts and locked worktrees are never touched.
 - **Nothing leaves the Mac.** No network calls, no analytics, no accounts.
 
 ## Why it isn't on the Mac App Store
@@ -218,6 +268,9 @@ Sources/RigWatch/
   Views.swift        every page, and the chip-die treemap
   Insight.swift      Top CPU/memory, who started what, the spike banner and timeline, what you can free
   Explain.swift      plain-words notes for common macOS processes
+  Rules.swift        the hook, the build queue, the clean-up and the command line
+  RulesView.swift    the Rules page
+  main.swift         runs a command-line command, or opens the app
 Assets/make-icon.swift   draws Assets/AppIcon.png
 ```
 

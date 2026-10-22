@@ -4,10 +4,11 @@ import SwiftUI
 
 /// One neon colour and icon per thing being watched, used everywhere that thing appears.
 enum Aspect: CaseIterable {
-    case cpu, memory, gpu, disk, network, android, ios, claude, worktree, process, thermal, server
+    case cpu, memory, gpu, disk, network, android, ios, claude, worktree, process, thermal, server, rules
 
     var color: Color {
         switch self {
+        case .rules: Color(hex: 0x2EE6D6)
         case .cpu: Color(hex: 0xFFB020)
         case .memory: Color(hex: 0xA78BFA)
         case .gpu: Color(hex: 0x22D3EE)
@@ -37,6 +38,7 @@ enum Aspect: CaseIterable {
         case .process: "gearshape.2"
         case .thermal: "thermometer.medium"
         case .server: "server.rack"
+        case .rules: "slider.horizontal.3"
         }
     }
 
@@ -56,7 +58,7 @@ extension Page {
     var aspect: Aspect {
         switch self {
         case .overview: .gpu; case .devices: .android; case .sessions: .claude; case .servers: .server; case .processes: .cpu
-        case .memory: .memory; case .worktrees: .worktree; case .disk: .disk
+        case .memory: .memory; case .worktrees: .worktree; case .disk: .disk; case .rules: .rules
         }
     }
 }

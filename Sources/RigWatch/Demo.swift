@@ -249,6 +249,45 @@ enum Demo {
         ]
     }
 
+    // MARK: rules
+
+    static func jobs() -> [BuildJob] {
+        let c = "/Users/demo/code/"
+        return [
+            BuildJob(pid: 20_901, start: 0, kind: "gradle", weight: 2, cwd: c + "acme-shop-android/.worktrees/fix-double-charge",
+                     cmd: "./gradlew --max-workers=6 :app:assembleDebug", state: "running", since: ago(140)),
+            BuildJob(pid: 20_944, start: 0, kind: "xcodebuild", weight: 2, cwd: c + "acme-shop-ios/.worktrees/order-widget",
+                     cmd: "xcodebuild -jobs 6 -scheme AcmeShop -destination 'platform=iOS Simulator,name=iPhone 16 Pro' build", state: "running", since: ago(65)),
+            BuildJob(pid: 20_970, start: 0, kind: "gradle", weight: 2, cwd: c + "acme-shop-android/.worktrees/compose-settings",
+                     cmd: "./gradlew --max-workers=6 testDebugUnitTest", state: "waiting", since: ago(38)),
+        ]
+    }
+
+    static func reapReport() -> ReapReport {
+        var r = ReapReport(at: ago(240), applied: true)
+        r.actions = [
+            ReapAction(kind: "Shut down", target: "Pixel_Tablet_API_34", key: "emulator-5556", detail: "Android emulator, idle 26.0 h · Galaxy S24 connected", bytes: Int64(4_300 * mb), result: "Shut down Pixel_Tablet_API_34."),
+            ReapAction(kind: "Remove worktree", target: "~/code/acme-shop-android/.worktrees/release-4.11", key: "wt1", detail: "release/4.11, clean, idle 9 d. The branch and its commits stay.", bytes: Int64(3 * gb), result: "Removed."),
+            ReapAction(kind: "Strip build output", target: "~/code/acme-shop-ios/.worktrees/a11y-onboarding", key: "wt2", detail: "source kept (2 uncommitted change(s), e.g. Onboarding/Welcome.swift); idle 4 d; deletes build, node_modules", bytes: Int64(1_200 * mb), result: "Deleted 2 folder(s)."),
+            ReapAction(kind: "Remove worktree", target: "~/code/acme-api/.worktrees/spike-graphql", key: "wt3", detail: "spike/graphql, clean, idle 21 d. The branch and its commits stay.", bytes: Int64(600 * mb), result: "Removed."),
+            ReapAction(kind: "Delete DerivedData", target: "AcmeShop-bqzkxnhgfyyqwe", key: "dd1", detail: "its project ~/code/acme-shop-ios/.worktrees/old-cart/AcmeShop.xcodeproj no longer exists", bytes: Int64(7_400 * mb), result: "Deleted."),
+        ]
+        r.kept = ["Pixel_8_API_35 (emulator-5554): used 1 min ago", "iPhone 16 Pro (B1A2C3D4-E5F6-4789-A0B1-C2D3E4F5A6B7): used 2 min ago"]
+        return r
+    }
+
+    static func ruleLog() -> [String] {
+        let f = Rules.stamp
+        return [
+            f.string(from: ago(240)) + " shut down Pixel_Tablet_API_34 (emulator-5556): Android emulator, idle 26.0 h · Galaxy S24 connected",
+            f.string(from: ago(238)) + " remove /Users/demo/code/acme-shop-android/.worktrees/release-4.11: Removed.",
+            f.string(from: ago(236)) + " cached node_modules 5c1e9a07d2b4f310 from ~/code/acme-shop-ios/.worktrees/a11y-onboarding",
+            f.string(from: ago(235)) + " strip /Users/demo/code/acme-shop-ios/.worktrees/a11y-onboarding: build, node_modules",
+            f.string(from: ago(233)) + " remove /Users/demo/code/acme-api/.worktrees/spike-graphql: Removed.",
+            f.string(from: ago(232)) + " delete DerivedData AcmeShop-bqzkxnhgfyyqwe",
+        ].reversed()
+    }
+
     // MARK: disk
 
     static func folders() -> [Folder] {

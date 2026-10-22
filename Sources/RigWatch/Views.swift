@@ -54,6 +54,7 @@ struct RootView: View {
                     case .memory: MemoryView()
                     case .worktrees: WorktreesView()
                     case .disk: DiskView()
+                    case .rules: RulesView()
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }

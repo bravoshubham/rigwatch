@@ -147,13 +147,22 @@ final class ProcSampler {
         return ["mlx_lm", "mlx-lm", "omlx", "vllm", "llama_cpp"].contains { a.contains($0) }
     }
 
-    /// Start time (mach abs) of one of our processes, to tell a pid apart from a reused one.
-    static func startTime(_ pid: Int32) -> UInt64? {
+    private static func usage(_ pid: Int32) -> rusage_info_v4? {
         var ri = rusage_info_v4()
         let rc = withUnsafeMutablePointer(to: &ri) {
             $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
         }
-        return rc == 0 ? ri.ri_proc_start_abstime : nil
+        return rc == 0 ? ri : nil
+    }
+
+    /// Start time (mach abs) of one of our processes, to tell a pid apart from a reused one.
+    static func startTime(_ pid: Int32) -> UInt64? { usage(pid)?.ri_proc_start_abstime }
+
+    /// CPU time (user + system) one of our processes has used, in seconds.
+    static func cpuSeconds(_ pid: Int32) -> Double? {
+        guard let ri = usage(pid) else { return nil }
+        var tb = mach_timebase_info(); mach_timebase_info(&tb)
+        return Double(ri.ri_user_time + ri.ri_system_time) * Double(tb.numer) / Double(tb.denom) / 1e9
     }
 
     /// Current directory of one of our processes (for "is this worktree in use?").
