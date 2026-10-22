@@ -88,12 +88,16 @@ at once, desktop app and terminal alike:
   is connected or another virtual one is already running. `RIGWATCH_VIRTUAL=1` in front of the command
   lets it through.
 - **Shut down idle emulators and simulators** after 30 minutes with no command or device tool naming
-  them (10 with a phone connected). Pin one to keep it.
+  them (10 with a phone connected). Only ones an agent session started; one you opened yourself is
+  never shut down. Pin one to keep it.
 - **Clean up idle worktrees** untouched for a day: a clean one is removed (its branch and commits
-  stay); one with uncommitted work or commits on no remote keeps its source and loses only build output.
-  `node_modules` is kept aside first and cloned back (APFS, seconds, no extra disk) into the next
-  worktree with the same lockfile.
-- **Delete orphaned DerivedData** whose project no longer exists.
+  stay); one with uncommitted work, commits on no remote or untracked files keeps its source and loses
+  only build folders git ignores. `node_modules` is kept aside first and cloned back (APFS, seconds,
+  no extra disk) into the next worktree with the same lockfile. Worktrees Claude Code manages itself
+  are left alone.
+- **Delete orphaned DerivedData** whose project is provably gone: its folder can be read and no longer
+  holds it. Projects on external drives or in folders macOS guards are left alone.
+- **Never clean up** lists folders the clean-up leaves alone completely (e.g. `~/work, ~/clients`).
 
 **Turn on** adds a `PreToolUse` hook to `~/.claude/settings.json` (the old file is kept as
 `settings.json.rigwatch-backup`) and a LaunchAgent that runs the clean-up every 10 minutes; for its
@@ -233,8 +237,9 @@ nothing else on your Mac.
 - **Agent session files are read, never written**: Claude Code transcripts in `~/.claude/projects`,
   OpenCode's database (opened read-only), Codex's rollouts in `~/.codex/sessions`.
 - **The Rules clean-up never removes work.** A worktree is removed only when it is clean, has no
-  commit missing from every remote, no process inside and no untracked file beyond build output; it
-  is checked again right before removal. Main checkouts and locked worktrees are never touched.
+  commit missing from every remote, no process inside and no untracked file git does not ignore; it
+  is checked again right before removal. Only build folders git ignores are ever deleted. Main
+  checkouts, locked worktrees, Claude Code's own worktrees and never-clean folders are never touched.
 - **Nothing leaves the Mac.** No network calls, no analytics, no accounts.
 
 ## Why it isn't on the Mac App Store

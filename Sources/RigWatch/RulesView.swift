@@ -146,16 +146,25 @@ struct RulesView: View {
                 rule("Physical devices first", $s.physicalFirst,
                      "Booting an emulator or simulator is refused while a phone of that kind is connected, or another virtual one is already running. Putting RIGWATCH_VIRTUAL=1 in front of the command lets it through.") { EmptyView() }
                 rule("Shut down idle emulators and simulators", $s.reapDevices,
-                     "After this long with no command or device tool naming it. Pinned devices are kept.") {
+                     "After this long with no command or device tool naming it. Only ones an agent session started; one you opened yourself is never shut down. Pinned devices are kept.") {
                     Stepper(value: $s.deviceIdleMinutes, in: 10...240, step: 10) { setting("\(s.deviceIdleMinutes) min") }
                     Stepper(value: $s.deviceIdleWithPhoneMinutes, in: 5...240, step: 5) { setting("\(s.deviceIdleWithPhoneMinutes) min with a phone connected") }
                 }
                 rule("Clean up idle worktrees", $s.reapWorktrees,
-                     "Untouched for this long: a clean worktree is removed, its branch and commits stay. One with uncommitted work or commits on no remote keeps its source and loses only build output (and node_modules, which is kept aside and cloned back into the next worktree with the same lockfile). Never a main checkout, a locked worktree or one a process is using.") {
+                     "Untouched for this long: a clean worktree is removed, its branch and commits stay. One with uncommitted work, commits on no remote or untracked files keeps its source and loses only build folders git ignores (and node_modules, which is kept aside and cloned back into the next worktree with the same lockfile). Never a main checkout, a locked worktree or one a process is using.") {
                     Stepper(value: $s.worktreeIdleHours, in: 6...336, step: 6) { setting("\(s.worktreeIdleHours) h") }
                 }
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Never clean up").font(.system(size: 13, weight: .semibold))
+                    Text("Folders the clean-up leaves alone completely: no worktree, build output or DerivedData of a project in them. Separate with commas, e.g. ~/work, ~/clients. Worktrees Claude Code manages itself are always left alone.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    TextField("~/work, ~/clients", text: Binding(
+                        get: { s.neverClean.joined(separator: ", ") },
+                        set: { s.neverClean = $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }))
+                        .textFieldStyle(.roundedBorder).font(.system(size: 11, design: .monospaced)).frame(maxWidth: 420)
+                }.padding(.leading, 46)
                 rule("Delete orphaned DerivedData", $s.reapDerivedData,
-                     "Xcode build folders whose project no longer exists, untouched for a day.") { EmptyView() }
+                     "Xcode build folders untouched for a day whose project is provably gone: its folder can be read and no longer holds it. Projects on external drives or in folders macOS guards are left alone.") { EmptyView() }
             }
         }
     }

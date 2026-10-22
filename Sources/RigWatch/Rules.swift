@@ -16,6 +16,16 @@ struct RuleSettings: Codable, Equatable {
     var reapWorktrees = true
     var worktreeIdleHours = 24
     var reapDerivedData = true
+    /// Folders the clean-up never touches: no worktree, build output or DerivedData of a project in them.
+    var neverClean: [String] = []
+
+    /// True for a path inside one of the never-clean folders (`~` allowed).
+    func protects(_ path: String) -> Bool {
+        neverClean.contains { f in
+            let f = (f.trimmingCharacters(in: .whitespaces) as NSString).expandingTildeInPath
+            return !f.isEmpty && (path == f || path.hasPrefix(f.hasSuffix("/") ? f : f + "/"))
+        }
+    }
 
     /// Keys missing from the file keep their defaults, so a file from an older version still loads.
     static func load() -> RuleSettings {
@@ -156,6 +166,7 @@ enum Rules {
     static func wrap(_ cmd: String, _ s: RuleSettings) -> Wrap {
         noteUse(cmd)
         if s.physicalFirst, let why = bootBlock(cmd) { return .deny(why) }
+        noteBoot(cmd)
         guard s.queueBuilds, !cmd.contains(" run --kind "), let kind = classify(cmd) else { return .leave }
         return .wrap("\(quote(exe)) run --kind \(kind) -- /bin/zsh -c \(quote(withThreads(cmd, kind: kind, n: s.buildThreads)))", kind)
     }
@@ -164,6 +175,21 @@ enum Rules {
     static func noteUse(_ cmd: String) {
         for u in uses where has(u.rx, cmd) { touch(u.plat) }
         matches(deviceIds, cmd).forEach(touch)
+    }
+
+    /// The AVD or simulator an agent's boot command names, recorded so the clean-up knows an agent started it.
+    static let bootNames = rx(#"-avd\s+["']?([^"'\s;&|]+)|(?:^|\s)@([\w.-]+)|simctl\s+boot\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))"#)
+    static func noteBoot(_ cmd: String) {
+        for b in boot where has(b.rx, cmd) {
+            for m in bootNames.matches(in: cmd, range: NSRange(cmd.startIndex..., in: cmd)) {
+                for g in 1..<m.numberOfRanges { if let r = Range(m.range(at: g), in: cmd) { touch("boot-" + cmd[r]) } }
+            }
+        }
+    }
+    /// True when an agent's boot command named this device within five minutes of it starting.
+    static func agentBooted(_ d: Device) -> Bool {
+        guard let started = d.started else { return false }
+        return [d.id, d.name].contains { k in touched("boot-" + k).map { abs(started.timeIntervalSince($0)) < 300 } ?? false }
     }
 
     static func bootBlock(_ cmd: String) -> String? {
@@ -475,7 +501,7 @@ enum Rules {
         let diskStamp = dir + "/last-disk-reap"
         if explicit || !apply || (mtime(diskStamp).map { Date().timeIntervalSince($0) > 3600 } ?? true) {
             if s.reapWorktrees { reapWorktrees(&r, s, procs, apply: apply) }
-            if s.reapDerivedData { reapDerivedData(&r, apply: apply) }
+            if s.reapDerivedData { reapDerivedData(&r, s, apply: apply) }
             if apply { FileManager.default.createFile(atPath: diskStamp, contents: nil) }
         } else {
             r.notes.append("Worktrees and DerivedData are checked once an hour; last checked \(Fmt.ago(mtime(diskStamp))).")
@@ -515,6 +541,8 @@ enum Rules {
             let idle = now.timeIntervalSince(last)
             let name = "\(d.name) (\(d.id))"
             if pinned.contains(d.id) || pinned.contains(d.name) { r.kept.append("\(name): pinned"); continue }
+            // Only what an agent started: a device a person opened may be in use without any command naming it.
+            guard d.launchedBy != nil || agentBooted(d) else { r.kept.append("\(name): not started by an agent session"); continue }
             guard idle > limit else { r.kept.append("\(name): used \(Fmt.ago(last))"); continue }
             var a = ReapAction(kind: "Shut down", target: d.name, key: d.id,
                                detail: "\(d.kind.rawValue), idle \(Fmt.ago(last).replacingOccurrences(of: " ago", with: ""))" + (phys.isEmpty ? "" : " · \(phys.joined(separator: ", ")) connected"),
@@ -523,6 +551,10 @@ enum Rules {
             r.actions.append(a)
         }
     }
+
+    /// Worktrees an agent app creates and tracks itself (Claude Code's own sessions): removing one would pull
+    /// the folder out from under a session the app still lists.
+    static let managedWorktreeMarkers = ["/.claude/worktrees/"]
 
     /// Untracked files a person put there by hand: a worktree holding them is never removed unattended.
     static let unattendedKeep = ["app/keystore", "Secrets.xcconfig"]
@@ -533,6 +565,8 @@ enum Rules {
         let limit = TimeInterval(s.worktreeIdleHours * 3600), now = Date()
         for w in Worktrees.list(cwds: cwds) where !w.isMain && !w.locked && w.usedBy.isEmpty {
             let name = Views.tilde(w.path)
+            if s.protects(w.path) || s.protects(w.repoPath) { r.kept.append("\(name): in a never-clean folder"); continue }
+            if managedWorktreeMarkers.contains(where: w.path.contains) { r.kept.append("\(name): managed by Claude Code"); continue }
             if !w.exists {
                 var a = ReapAction(kind: "Prune", target: name, key: w.path, detail: "the folder is gone; drops git's stale entry for it")
                 if apply { a.result = Worktrees.remove(w, force: false); log("prune \(w.path)") }
@@ -546,22 +580,28 @@ enum Rules {
             let c = Worktrees.check(w, sessionWorking: false)
             let secrets = st.contains { l in l.hasPrefix("??") && unattendedKeep.contains { l.dropFirst(3).hasPrefix($0) } }
             let nm = w.path + "/node_modules"
-            let cached = seedNodeModules(w.path, apply: apply)
-            if c.safe && !secrets {
+            let nmIgnored = isDir(nm) && !ignored(["node_modules"], in: w.path).isEmpty
+            let cached = nmIgnored && seedNodeModules(w.path, apply: apply)
+            // Unattended removal also needs no untracked file git doesn't ignore, setup files included.
+            let loose = st.contains { $0.hasPrefix("??") }
+            if c.safe && !secrets && !loose {
                 var a = ReapAction(kind: "Remove worktree", target: name, key: w.path, detail: "\(w.branch), clean, \(idle). The branch and its commits stay.",
                                    bytes: Worktrees.sizeKB(w.path).map { $0 * 1024 })
                 if apply {
                     // The big regenerable folders first, with no time limit, so git's own remove is quick.
-                    (buildOutputs(w.path) + (isDir(nm) ? [nm] : [])).forEach { try? fm.removeItem(atPath: $0) }
+                    (buildOutputs(w.path) + (nmIgnored ? [nm] : [])).forEach { try? fm.removeItem(atPath: $0) }
                     let again = Worktrees.check(w, sessionWorking: false)
-                    a.result = again.safe ? Worktrees.remove(w, force: again.force) : "Kept: " + again.reasons.joined(separator: " ")
+                    let looseNow = Sh.git(["status", "--porcelain", "--untracked-files=normal"], in: w.path).out.split(separator: "\n").contains { $0.hasPrefix("??") }
+                    a.result = again.safe && !looseNow ? Worktrees.remove(w, force: again.force)
+                        : "Kept: " + (looseNow ? "untracked files appeared. " : "") + again.reasons.joined(separator: " ")
                     log("remove \(w.path): \(a.result ?? "")")
                 }
                 r.actions.append(a)
                 continue
             }
-            let drop = buildOutputs(w.path) + (cached && isDir(nm) ? [nm] : [])
-            let why = secrets ? "untracked \(unattendedKeep.joined(separator: " or "))" : c.reasons.joined(separator: " ")
+            let drop = buildOutputs(w.path) + (cached ? [nm] : [])
+            let why = secrets ? "untracked \(unattendedKeep.joined(separator: " or "))"
+                : c.safe && loose ? "untracked files that git does not ignore" : c.reasons.joined(separator: " ")
             let bytes = drop.compactMap(Worktrees.sizeKB).reduce(0, +) * 1024
             guard bytes >= 50 << 20 else { r.kept.append("\(name): \(why) (\(idle))"); continue }   // not worth an action
             var a = ReapAction(kind: "Strip build output", target: name, key: w.path,
@@ -576,20 +616,48 @@ enum Rules {
         }
     }
 
-    /// Folders a build regenerates, never one git tracks files in.
+    /// Folders a build regenerates: only ones git ignores, and never one git tracks files in. An untracked
+    /// folder git does not ignore may be someone's work that is simply not committed yet.
     static func buildOutputs(_ wt: String) -> [String] {
         let kids = (try? FileManager.default.contentsOfDirectory(atPath: wt)) ?? []
         let dirs = (["build", ".gradle", ".kotlin"] + kids.map { $0 + "/build" }).filter { isDir(wt + "/" + $0) }
         guard !dirs.isEmpty else { return [] }
         let tracked = Sh.git(["ls-files", "--"] + dirs, in: wt).out.split(separator: "\n")
-        return dirs.filter { d in !tracked.contains { $0.hasPrefix(d + "/") } }.map { wt + "/" + $0 }
+        return ignored(dirs.filter { d in !tracked.contains { $0.hasPrefix(d + "/") } }, in: wt).map { wt + "/" + $0 }
     }
 
-    static func reapDerivedData(_ r: inout ReapReport, apply: Bool) {
+    /// The paths (relative to the worktree) that git ignores there.
+    static func ignored(_ paths: [String], in wt: String) -> [String] {
+        guard !paths.isEmpty else { return [] }
+        let out = Set(Sh.git(["check-ignore", "--"] + paths.map { $0 + "/" }, in: wt).out.split(separator: "\n").map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: "/")) })
+        return paths.filter { out.contains($0) }
+    }
+
+    /// True only when the project is provably gone: its folder can be listed and the project is not in it.
+    /// "Can't see it" is never "gone": a project on an unplugged drive, in a folder macOS guards (where a
+    /// background check would also raise a privacy prompt) or in a never-clean folder is left alone.
+    static func projectGone(_ ws: String, _ s: RuleSettings) -> Bool {
+        guard ws.hasPrefix("/"), !ws.hasPrefix("/Volumes/"), !s.protects(ws), !underPrivate(ws) else { return false }
+        let parent = (ws as NSString).deletingLastPathComponent
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: parent) else { return false }
+        return !names.contains((ws as NSString).lastPathComponent)
+    }
+
+    /// The path or one of its folders is one macOS guards with a privacy prompt (see Worktrees.privateHome).
+    static func underPrivate(_ path: String) -> Bool {
+        var p = path
+        while p.count > 1 {
+            if Worktrees.isPrivate(p) { return true }
+            p = (p as NSString).deletingLastPathComponent
+        }
+        return false
+    }
+
+    static func reapDerivedData(_ r: inout ReapReport, _ s: RuleSettings, apply: Bool) {
         let dd = Sh.home + "/Library/Developer/Xcode/DerivedData"
         for n in ((try? FileManager.default.contentsOfDirectory(atPath: dd)) ?? []).sorted() where n.contains("-") {
             let p = dd + "/" + n
-            guard let ws = NSDictionary(contentsOfFile: p + "/info.plist")?["WorkspacePath"] as? String, !FileManager.default.fileExists(atPath: ws),
+            guard let ws = NSDictionary(contentsOfFile: p + "/info.plist")?["WorkspacePath"] as? String, projectGone(ws, s),
                   let t = mtime(p), Date().timeIntervalSince(t) > 86400 else { continue }
             var a = ReapAction(kind: "Delete DerivedData", target: n, key: p, detail: "its project \(Views.tilde(ws)) no longer exists",
                                bytes: Worktrees.sizeKB(p).map { $0 * 1024 })
