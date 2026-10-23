@@ -102,6 +102,13 @@ enum DeviceManager {
             if let w = want, devs.contains(where: { self.platform(of: $0) == platform && ($0.id == w || $0.name.caseInsensitiveCompare(w) == .orderedSame) }) {
                 return .failure(Failure(message: "\(w) is running but held by another session. Ask for any \(platform) device, or wait for it to be released."))
             }
+            if let cap = Rules.virtualCap(platform, s) {
+                let virt = devs.filter { $0.kind != .phone && self.platform(of: $0) == platform }
+                if virt.count >= cap {
+                    let who = virt.map { d in "\(d.name) (\(now.first { $0.covers(d) }.map { $0.isImplicit ? "in use by session \($0.session)" : "leased to session \($0.session)" } ?? (d.claim.map { "held by agent-device for \($0.session)" } ?? "running")))" }
+                    return .failure(Failure(message: "No \(platform) device is free, and \(virt.count) \(platform == "ios" ? "simulator" : "emulator")\(virt.count == 1 ? " already runs" : "s already run"), the most the Rules allow: \(who.joined(separator: "; ")). Wait and ask again, or ask the user to raise the limit on RigWatch's Rules page."))
+                }
+            }
             if Rules.pressure() >= 4 { return .failure(Failure(message: "Memory pressure is critical, so RigWatch won't boot another device now. Free memory or wait, then ask again.")) }
             if platform == "android" {
                 let running = Set(devs.filter { $0.kind == .emulator }.map(\.name))

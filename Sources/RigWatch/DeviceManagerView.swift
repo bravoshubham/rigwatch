@@ -48,7 +48,15 @@ struct DeviceManagerView: View {
 
     // MARK: header
 
+    /// Running count against the Rules' limit, red once it is passed.
+    func capReadout(_ label: String, _ n: Int, _ cap: Int?) -> some View {
+        Readout(label: label, value: "\(n)", unit: cap.map { "of \($0)" } ?? "",
+                color: cap.map { n > $0 ? Color(hex: 0xFF4D5E).readable(scheme) : .primary } ?? .primary, size: 30)
+            .help(cap.map { n > $0 ? "More than the Rules allow (\($0)): something booted one outside RigWatch's reach." : "The Rules allow \($0) at once." } ?? "No limit set on the Rules page.")
+    }
+
     func header(_ devs: [Device]) -> some View {
+        let s = RuleSettings.load()
         let leased = devs.filter { hold($0) == .leased }.count, held = devs.filter { hold($0) == .held }.count, free = devs.filter { hold($0) == .free }.count
         let inUse = devs.filter { hold($0) == .inUse }.count
         return Panel(aspect: .android) {
@@ -57,6 +65,8 @@ struct DeviceManagerView: View {
                 Readout(label: "In use, no lease", value: "\(inUse)", color: inUse > 0 ? Color(hex: 0xFF8A3D).readable(scheme) : .primary, size: 30)
                 Readout(label: "Free", value: "\(free)", size: 30)
                 Readout(label: "Held by agent-device", value: "\(held)", color: held > 0 ? Color(hex: 0xFFD23F).readable(scheme) : .primary, size: 30)
+                capReadout("Emulators", devs.filter { $0.kind == .emulator }.count, Rules.virtualCap("android", s))
+                capReadout("Simulators", devs.filter { $0.kind == .simulator }.count, Rules.virtualCap("ios", s))
                 Spacer(minLength: 12)
                 VStack(alignment: .trailing, spacing: 6) {
                     Chip(text: registered ? "DEVICE MANAGER ON" : "DEVICE MANAGER OFF", icon: "key", color: registered ? Color(hex: 0x3DDC97) : Aspect.process.color, filled: registered)

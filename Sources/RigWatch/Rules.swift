@@ -13,6 +13,9 @@ struct RuleSettings: Codable, Equatable {
     var lowerOutside = true      // builds outside the queue, and Gradle's daemons, run at lower priority
     var buildThreads = max(2, ProcessInfo.processInfo.activeProcessorCount / 3)
     var physicalFirst = true
+    var limitVirtual = true      // at most this many emulators and simulators running at once
+    var maxEmulators = 2
+    var maxSimulators = 2
     var reapDevices = true
     var deviceIdleMinutes = 30
     var deviceIdleWithPhoneMinutes = 10
@@ -177,6 +180,7 @@ enum Rules {
 
     static func wrap(_ cmd: String, _ s: RuleSettings) -> Wrap {
         noteUse(cmd)
+        if s.limitVirtual, let why = capBlock(cmd, s) { return .deny(why) }
         if s.physicalFirst, let why = bootBlock(cmd) { return .deny(why) }
         noteBoot(cmd)
         guard s.queueBuilds, !cmd.contains(" run --kind "), let kind = classify(cmd) else { return .leave }
@@ -202,6 +206,26 @@ enum Rules {
     static func agentBooted(_ d: Device) -> Bool {
         guard let started = d.started else { return false }
         return [d.id, d.name].contains { k in touched("boot-" + k).map { abs(started.timeIntervalSince($0)) < 300 } ?? false }
+    }
+
+    /// The cap on running virtual devices of a platform, or nil when there is none.
+    static func virtualCap(_ plat: String, _ s: RuleSettings) -> Int? {
+        s.limitVirtual ? max(1, plat == "ios" ? s.maxSimulators : s.maxEmulators) : nil
+    }
+
+    /// Refuses a boot command once as many emulators or simulators run as the Rules allow. Unlike
+    /// "physical devices first" there is no override: the cap is the most the Mac should carry.
+    static func capBlock(_ cmd: String, _ s: RuleSettings) -> String? {
+        for b in boot where has(b.rx, cmd) {
+            guard let cap = virtualCap(b.plat, s) else { continue }
+            let (_, virt) = devices(b.plat)
+            if virt.count >= cap {
+                let kind = b.plat == "ios" ? "simulator" : "emulator"
+                return "\(virt.count == 1 ? "A \(kind) already runs" : "\(virt.count) \(kind)s already run") on this machine (\(virt.map { "\($0.name) \($0.id)" }.joined(separator: ", "))), the most RigWatch's rules allow. " +
+                    "Use one of them (the rigwatch MCP tool acquire_device gives you a free one), or wait until one is released; don't boot another."
+            }
+        }
+        return nil
     }
 
     static func bootBlock(_ cmd: String) -> String? {

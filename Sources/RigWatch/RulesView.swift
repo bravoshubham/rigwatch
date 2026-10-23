@@ -176,6 +176,11 @@ struct RulesView: View {
                 }
                 rule("Physical devices first", $s.physicalFirst,
                      "Booting an emulator or simulator is refused while a phone of that kind is connected, or another virtual one is already running. Putting RIGWATCH_VIRTUAL=1 in front of the command lets it through.") { EmptyView() }
+                rule("Limit running emulators and simulators", $s.limitVirtual,
+                     "Booting another is refused once this many run: an agent's boot command, and acquire_device when no device is free. Boots the hook can't see (Xcode, a test run, other device tools) still happen; the Device Manager page shows when the limit is passed.") {
+                    Stepper(value: $s.maxEmulators, in: 1...8) { setting("\(s.maxEmulators) emulators") }
+                    Stepper(value: $s.maxSimulators, in: 1...8) { setting("\(s.maxSimulators) simulators") }
+                }
                 rule("Shut down idle emulators and simulators", $s.reapDevices,
                      "After this long with no command or device tool naming it. Only ones an agent session started; one you opened yourself is never shut down. Pinned devices are kept.") {
                     Stepper(value: $s.deviceIdleMinutes, in: 10...240, step: 10) { setting("\(s.deviceIdleMinutes) min") }
