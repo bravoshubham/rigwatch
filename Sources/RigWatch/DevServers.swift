@@ -42,7 +42,9 @@ final class DevServerScanner {
         let path = p.path
         if path.hasPrefix("/System/") || path.hasPrefix("/usr/libexec/") || path.hasPrefix("/usr/sbin/") || path.hasPrefix("/sbin/") { return false }
         if path.contains(".app/") && !path.contains("/Python.app/") { return false }
-        return !["ssh", "adb", "launchd"].contains(p.name)
+        // An emulator's console and adb ports, and a simulator's services, are devices, not dev servers.
+        if p.name.hasPrefix("qemu-system") || path.contains("/sdk/emulator/") || path.contains("/CoreSimulator/") { return false }
+        return !["ssh", "adb", "launchd", "netsimd"].contains(p.name)
     }
 
     /// Sockets are re-listed at most every 3 s, and then only for processes that are new, already
