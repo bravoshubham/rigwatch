@@ -327,14 +327,30 @@ final class Monitor: ObservableObject {
 
     // MARK: actions (always behind a confirmation)
 
+    /// Confirmed actions in progress (their titles, in start order) and the result of the last one, for the
+    /// action bar at the top of the window. A failure stays there until dismissed.
+    @Published var working: [String] = []
+    @Published var outcome: ActionOutcome?
+
+    struct ActionOutcome: Equatable { let id = UUID(); let title: String; let text: String; let failed: Bool }
+
+    /// Results are plain sentences; these words mark the ones where the action did not happen.
+    static func looksFailed(_ msg: String) -> Bool {
+        let m = msg.lowercased()
+        return ["could not", "failed", "refused", "not allowed", "still running", "error", "no longer running"].contains { m.contains($0) }
+    }
+
     func perform(_ key: String, _ work: @escaping () -> String) {
-        if Demo.on { toast = "Demo mode: nothing was changed."; return }
+        let title = key.hasSuffix("?") ? String(key.dropLast()) : key
+        if Demo.on { outcome = ActionOutcome(title: title, text: "Demo mode: nothing was changed.", failed: false); return }
         busy.insert(key)
+        working.append(title)
         q.async {
             let msg = work()
             DispatchQueue.main.async {
                 self.busy.remove(key)
-                self.toast = msg
+                if let i = self.working.firstIndex(of: title) { self.working.remove(at: i) }
+                self.outcome = ActionOutcome(title: title, text: msg.isEmpty ? "Done." : msg, failed: Self.looksFailed(msg))
                 self.lastWorktrees = .distantPast
                 self.refresh(worktreesNow: key.hasPrefix("wt:"))
                 // A quit process can take a moment to exit: look again so its card goes promptly.
@@ -343,14 +359,44 @@ final class Monitor: ObservableObject {
         }
     }
 
+    /// Sends `sig` to each process that is still the same run (pid and start time), then waits up to
+    /// `wait` seconds for them to exit. Returns what really happened, not just that a signal went out.
+    nonisolated static func signal(_ targets: [(pid: Int32, start: UInt64)], _ sig: Int32, wait: Double) -> (exited: [Int32], still: [Int32], gone: Int, failed: [String]) {
+        var sent: [Int32] = [], gone = 0, failed: [String] = []
+        for t in targets {
+            guard ProcSampler.startTime(t.pid) == t.start else { gone += 1; continue }
+            if kill(t.pid, sig) == 0 { sent.append(t.pid) } else { failed.append("\(t.pid): \(String(cString: strerror(errno)))") }
+        }
+        let starts = Dictionary(uniqueKeysWithValues: targets.map { ($0.pid, $0.start) })
+        let alive = { (pid: Int32) in ProcSampler.startTime(pid) == starts[pid] }
+        let deadline = Date().addingTimeInterval(wait)
+        while sent.contains(where: alive) && Date() < deadline { usleep(200_000) }
+        return (sent.filter { !alive($0) }, sent.filter(alive), gone, failed)
+    }
+
+    /// One sentence for the action bar from `signal`'s result.
+    nonisolated static func signalReport(_ name: String, _ r: (exited: [Int32], still: [Int32], gone: Int, failed: [String]), force: Bool) -> String {
+        if !r.failed.isEmpty { return "Could not signal \(r.failed.joined(separator: ", "))." }
+        if !r.still.isEmpty {
+            let pids = r.still.map(String.init).joined(separator: ", ")
+            return force ? "\(name) (pid \(pids)) is still running after SIGKILL." :
+                "\(name) (pid \(pids)) is still running 5 s after SIGTERM: it may be saving, or ignoring the signal. Force Quit stops it at once."
+        }
+        if r.exited.isEmpty { return "\(name) had already exited." }
+        return "\(name) quit (pid \(r.exited.map(String.init).joined(separator: ", ")))." + (r.gone > 0 ? " \(r.gone) had already exited." : "")
+    }
+
+    /// An action refused before its dialog: shown in the action bar like a failure.
+    func refuse(_ title: String, _ text: String) { outcome = ActionOutcome(title: title, text: text, failed: true) }
+
     func confirmQuit(_ p: Proc, force: Bool = false) {
-        if let why = Safety.processBlock(p) { toast = "Not allowed: \(why)"; return }
+        if let why = Safety.processBlock(p) { refuse("Quit \(p.name)", "Not allowed: \(why)"); return }
         var msg = "\(p.name) (pid \(p.pid)) · CPU \(Fmt.cpu(p.cpu)) · \(Fmt.bytes(p.mem))\n\(p.path)"
         if let s = p.session { msg += "\n\nStarted by agent session: \(sessionLabel(s))" }
         if let w = Safety.processWarning(p, sessions: sessions) { msg += "\n\n⚠️ \(w)" }
         msg += force ? "\n\nForce Quit (SIGKILL) gives it no chance to save anything." : "\n\nQuit sends SIGTERM so it can shut down cleanly."
         pending = Pending(title: force ? "Force quit \(p.name)?" : "Quit \(p.name)?", message: msg, button: force ? "Force Quit" : "Quit") {
-            kill(p.pid, force ? SIGKILL : SIGTERM) == 0 ? "Sent \(force ? "SIGKILL" : "SIGTERM") to \(p.name) (\(p.pid))." : "Could not signal \(p.pid): \(String(cString: strerror(errno)))"
+            Self.signalReport(p.name, Self.signal([(p.pid, p.start)], force ? SIGKILL : SIGTERM, wait: force ? 2 : 5), force: force)
         }
     }
 
@@ -359,12 +405,12 @@ final class Monitor: ObservableObject {
         if Demo.on { toast = "Demo mode: nothing was changed."; return }
         let targets = s.pids.compactMap { pid, start in procs.first { $0.pid == pid && $0.start == start } }.sorted { $0.pid < $1.pid }
         guard !targets.isEmpty else {
-            toast = s.host == "Desktop" ? "Desktop sessions run inside the Claude app: archive this one there." : "\(s.title) is no longer running."
+            refuse("Quit session", s.host == "Desktop" ? "Desktop sessions run inside the Claude app: archive this one there." : "\(s.title) is no longer running.")
             return
         }
         for p in targets {
-            if let why = Safety.processBlock(p) { toast = "Not allowed: \(why)"; return }
-            if p.path.hasSuffix("Claude.app/Contents/MacOS/Claude") { toast = "Not allowed: that is the Claude desktop app."; return }
+            if let why = Safety.processBlock(p) { refuse("Quit session", "Not allowed: \(why)"); return }
+            if p.path.hasSuffix("Claude.app/Contents/MacOS/Claude") { refuse("Quit session", "Not allowed: that is the Claude desktop app."); return }
         }
         let host = s.host == "Desktop" ? "CLI" : s.host   // a Desktop card only lists its terminal processes here
         var msg = "\(s.agent.rawValue) · \(s.title)"
@@ -384,15 +430,8 @@ final class Monitor: ObservableObject {
         msg += "\n\nQuit sends SIGTERM so it can shut down cleanly."
         let list = targets.map { ($0.pid, $0.start) }, name = s.agent.rawValue
         pending = Pending(title: "Quit session \(s.title.prefix(40))?", message: msg, button: "Quit Session") {
-            var sent: [Int32] = [], gone = 0, failed: [String] = []
-            for (pid, start) in list {
-                // The pid may have been reused since the dialog opened: only signal the same process.
-                guard ProcSampler.startTime(pid) == start else { gone += 1; continue }
-                if kill(pid, SIGTERM) == 0 { sent.append(pid) } else { failed.append("\(pid): \(String(cString: strerror(errno)))") }
-            }
-            if !failed.isEmpty { return "Could not signal " + failed.joined(separator: ", ") }
-            if sent.isEmpty { return "\(name) had already exited." }
-            return "Sent SIGTERM to \(name) (pid \(sent.map(String.init).joined(separator: ", ")))." + (gone > 0 ? " \(gone) had already exited." : "")
+            // The pid may have been reused since the dialog opened: only the same process is signalled.
+            Self.signalReport(name, Self.signal(list.map { ($0.0, $0.1) }, SIGTERM, wait: 5), force: false)
         }
     }
 
@@ -415,8 +454,8 @@ final class Monitor: ObservableObject {
     /// Stop = Quit (SIGTERM) for the server's process, with the same rules and confirmation.
     func confirmStop(_ d: DevServer) {
         if Demo.on { toast = "Demo mode: nothing was changed."; return }
-        guard let p = procs.first(where: { $0.pid == d.pid && $0.start == d.start }) else { toast = "\(d.kind) is no longer running."; return }
-        if let why = Safety.processBlock(p) { toast = "Not allowed: \(why)"; return }
+        guard let p = procs.first(where: { $0.pid == d.pid && $0.start == d.start }) else { refuse("Stop \(d.kind)", "\(d.kind) is no longer running."); return }
+        if let why = Safety.processBlock(p) { refuse("Stop \(d.kind)", "Not allowed: \(why)"); return }
         var msg = "\(d.label) · \(p.name) (pid \(p.pid)) · CPU \(Fmt.cpu(p.cpu)) · \(Fmt.bytes(p.mem))"
         if let c = d.cwd { msg += "\n\(Views.tilde(c))" }
         msg += "\n\n" + startedBy(d).prefix(1).uppercased() + startedBy(d).dropFirst()
@@ -425,18 +464,20 @@ final class Monitor: ObservableObject {
         let pid = d.pid, start = d.start, name = d.kind
         pending = Pending(title: "Stop \(d.kind)?", message: msg, button: "Stop") {
             // The pid may have been reused since the dialog opened: only signal the same process.
-            guard ProcSampler.startTime(pid) == start else { return "\(name) had already stopped." }
-            return kill(pid, SIGTERM) == 0 ? "Sent SIGTERM to \(name) (\(pid))." : "Could not signal \(pid): \(String(cString: strerror(errno)))"
+            Self.signalReport(name, Self.signal([(pid, start)], SIGTERM, wait: 5), force: false)
         }
     }
 
     func confirmQuitGroup(_ g: ProcGroup) {
-        guard !g.killable.isEmpty else { toast = "Nothing in \(g.name) can be quit from here."; return }
+        guard !g.killable.isEmpty else { refuse("Quit \(g.name)", "Nothing in \(g.name) can be quit from here."); return }
+        let targets = g.killable.compactMap { pid in procs.first { $0.pid == pid }.map { (pid: pid, start: $0.start) } }
         pending = Pending(title: "Quit \(g.killable.count) process(es) in \(g.name)?",
                           message: "Sends SIGTERM to \(g.killable.count) of \(g.count) processes (\(Fmt.bytes(g.mem)), CPU \(Fmt.cpu(g.cpu))). System processes are skipped.",
                           button: "Quit All") {
-            let n = g.killable.filter { kill($0, SIGTERM) == 0 }.count
-            return "Sent SIGTERM to \(n) process(es) in \(g.name)."
+            let r = Self.signal(targets, SIGTERM, wait: 5)
+            if !r.failed.isEmpty { return "Could not signal \(r.failed.joined(separator: ", "))." }
+            return r.still.isEmpty ? "\(r.exited.count) process(es) in \(g.name) quit." + (r.gone > 0 ? " \(r.gone) had already exited." : "")
+                : "\(r.exited.count) of \(r.exited.count + r.still.count) in \(g.name) quit; \(r.still.count) still running 5 s after SIGTERM (pid \(r.still.map(String.init).joined(separator: ", ")))."
         }
     }
 

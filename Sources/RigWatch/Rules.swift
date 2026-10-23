@@ -61,7 +61,9 @@ struct ReapAction: Codable, Identifiable, Hashable {
     var detail: String
     var bytes: Int64? = nil      // memory for a device, disk for the rest
     var result: String? = nil    // set once applied
+    var outcome: String? = nil   // done, kept (a safety check stopped it) or failed; nil in reports from older versions
     var id: String { kind + key }
+    var failed: Bool { outcome == "failed" }
 }
 
 struct ReapReport: Codable {
@@ -549,7 +551,11 @@ enum Rules {
             var a = ReapAction(kind: "Shut down", target: d.name, key: d.id,
                                detail: "\(d.kind.rawValue), idle \(Fmt.ago(last).replacingOccurrences(of: " ago", with: ""))" + (phys.isEmpty ? "" : " · \(phys.joined(separator: ", ")) connected"),
                                bytes: Int64(d.mem))
-            if apply { a.result = DeviceSampler.shutDown(d); log("shut down \(name): \(a.detail). \(a.result ?? "")") }
+            if apply {
+                let res = DeviceSampler.shutDown(d)
+                a.result = res; a.outcome = res.hasPrefix("simctl shutdown failed") || res.contains("still running") ? "failed" : "done"
+                log("shut down \(name): \(a.detail). \(res)")
+            }
             r.actions.append(a)
         }
     }
@@ -571,7 +577,11 @@ enum Rules {
             if managedWorktreeMarkers.contains(where: w.path.contains) { r.kept.append("\(name): managed by Claude Code"); continue }
             if !w.exists {
                 var a = ReapAction(kind: "Prune", target: name, key: w.path, detail: "the folder is gone; drops git's stale entry for it")
-                if apply { a.result = Worktrees.remove(w, force: false); log("prune \(w.path)") }
+                if apply {
+                    let res = Worktrees.remove(w, force: false)
+                    a.result = res; a.outcome = res.hasPrefix("Pruned") || res.hasPrefix("Removed") ? "done" : "failed"
+                    log("prune \(w.path): \(res)")
+                }
                 r.actions.append(a)
                 continue
             }
@@ -594,8 +604,12 @@ enum Rules {
                     (buildOutputs(w.path) + (nmIgnored ? [nm] : [])).forEach { try? fm.removeItem(atPath: $0) }
                     let again = Worktrees.check(w, sessionWorking: false)
                     let looseNow = Sh.git(["status", "--porcelain", "--untracked-files=normal"], in: w.path).out.split(separator: "\n").contains { $0.hasPrefix("??") }
-                    a.result = again.safe && !looseNow ? Worktrees.remove(w, force: again.force)
-                        : "Kept: " + (looseNow ? "untracked files appeared. " : "") + again.reasons.joined(separator: " ")
+                    if again.safe && !looseNow {
+                        let res = Worktrees.remove(w, force: again.force)
+                        a.result = res; a.outcome = res.hasPrefix("Removed") ? "done" : "failed"
+                    } else {
+                        a.result = "Kept: " + (looseNow ? "untracked files appeared. " : "") + again.reasons.joined(separator: " "); a.outcome = "kept"
+                    }
                     log("remove \(w.path): \(a.result ?? "")")
                 }
                 r.actions.append(a)
@@ -610,8 +624,9 @@ enum Rules {
                                detail: "source kept (\(why)); \(idle); deletes \(drop.map { String($0.dropFirst(w.path.count + 1)) }.joined(separator: ", "))",
                                bytes: bytes)
             if apply {
-                drop.forEach { try? fm.removeItem(atPath: $0) }
-                a.result = "Deleted \(drop.count) folder(s)."
+                let gone = drop.filter { (try? fm.removeItem(atPath: $0)) != nil }.count
+                a.result = gone == drop.count ? "Deleted \(gone) folder(s)." : "Deleted \(gone) of \(drop.count) folders; the rest could not be deleted."
+                a.outcome = gone == drop.count ? "done" : "failed"
                 log("strip \(w.path): \(drop.map { String($0.dropFirst(w.path.count + 1)) }.joined(separator: ", "))")
             }
             r.actions.append(a)
@@ -663,7 +678,11 @@ enum Rules {
                   let t = mtime(p), Date().timeIntervalSince(t) > 86400 else { continue }
             var a = ReapAction(kind: "Delete DerivedData", target: n, key: p, detail: "its project \(Views.tilde(ws)) no longer exists",
                                bytes: Worktrees.sizeKB(p).map { $0 * 1024 })
-            if apply { a.result = (try? FileManager.default.removeItem(atPath: p)) != nil ? "Deleted." : "Could not delete."; log("delete DerivedData \(p)") }
+            if apply {
+                let ok = (try? FileManager.default.removeItem(atPath: p)) != nil
+                a.result = ok ? "Deleted." : "Could not delete."; a.outcome = ok ? "done" : "failed"
+                log("delete DerivedData \(p): \(a.result ?? "")")
+            }
             r.actions.append(a)
         }
     }

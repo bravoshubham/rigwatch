@@ -266,11 +266,11 @@ enum Demo {
     static func reapReport() -> ReapReport {
         var r = ReapReport(at: ago(240), applied: true)
         r.actions = [
-            ReapAction(kind: "Shut down", target: "Pixel_Tablet_API_34", key: "emulator-5556", detail: "Android emulator, idle 26.0 h · Galaxy S24 connected", bytes: Int64(4_300 * mb), result: "Shut down Pixel_Tablet_API_34."),
-            ReapAction(kind: "Remove worktree", target: "~/code/acme-shop-android/.worktrees/release-4.11", key: "wt1", detail: "release/4.11, clean, idle 9 d. The branch and its commits stay.", bytes: Int64(3 * gb), result: "Removed."),
-            ReapAction(kind: "Strip build output", target: "~/code/acme-shop-ios/.worktrees/a11y-onboarding", key: "wt2", detail: "source kept (2 uncommitted change(s), e.g. Onboarding/Welcome.swift); idle 4 d; deletes build, node_modules", bytes: Int64(1_200 * mb), result: "Deleted 2 folder(s)."),
-            ReapAction(kind: "Remove worktree", target: "~/code/acme-api/.worktrees/spike-graphql", key: "wt3", detail: "spike/graphql, clean, idle 21 d. The branch and its commits stay.", bytes: Int64(600 * mb), result: "Removed."),
-            ReapAction(kind: "Delete DerivedData", target: "AcmeShop-bqzkxnhgfyyqwe", key: "dd1", detail: "its project ~/code/acme-shop-ios/.worktrees/old-cart/AcmeShop.xcodeproj no longer exists", bytes: Int64(7_400 * mb), result: "Deleted."),
+            ReapAction(kind: "Shut down", target: "Pixel_Tablet_API_34", key: "emulator-5556", detail: "Android emulator, idle 26.0 h · Galaxy S24 connected", bytes: Int64(4_300 * mb), result: "Shut down Pixel_Tablet_API_34.", outcome: "done"),
+            ReapAction(kind: "Remove worktree", target: "~/code/acme-shop-android/.worktrees/release-4.11", key: "wt1", detail: "release/4.11, clean, idle 9 d. The branch and its commits stay.", bytes: Int64(3 * gb), result: "Removed.", outcome: "done"),
+            ReapAction(kind: "Strip build output", target: "~/code/acme-shop-ios/.worktrees/a11y-onboarding", key: "wt2", detail: "source kept (2 uncommitted change(s), e.g. Onboarding/Welcome.swift); idle 4 d; deletes build, node_modules", bytes: Int64(1_200 * mb), result: "Deleted 2 folder(s).", outcome: "done"),
+            ReapAction(kind: "Remove worktree", target: "~/code/acme-api/.worktrees/spike-graphql", key: "wt3", detail: "spike/graphql, clean, idle 21 d. The branch and its commits stay.", bytes: Int64(600 * mb), result: "Kept: untracked files appeared. ", outcome: "kept"),
+            ReapAction(kind: "Delete DerivedData", target: "AcmeShop-bqzkxnhgfyyqwe", key: "dd1", detail: "its project ~/code/acme-shop-ios/.worktrees/old-cart/AcmeShop.xcodeproj no longer exists", bytes: Int64(7_400 * mb), result: "Could not delete.", outcome: "failed"),
         ]
         r.kept = ["Pixel_8_API_35 (emulator-5554): used 1 min ago", "iPhone 16 Pro (B1A2C3D4-E5F6-4789-A0B1-C2D3E4F5A6B7): used 2 min ago"]
         return r

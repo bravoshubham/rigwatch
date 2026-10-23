@@ -88,6 +88,7 @@ struct RootView: View {
                 }
             }
         }
+        .overlay(alignment: .top) { ActionBar().padding(.top, 8) }
         .overlay(alignment: .bottom) {
             if let t = m.toast {
                 Text(t).font(.system(size: 11.5, weight: .medium, design: .monospaced))
@@ -912,7 +913,7 @@ struct ProcessesView: View {
                 Table(Array(rows), selection: $sel, sortOrder: $order) {
                     TableColumn("Name", value: \.name) { p in
                         HStack(spacing: 7) { Image(systemName: Aspect.forGroup(p.group).icon).font(.system(size: 10)).foregroundStyle(Aspect.forGroup(p.group).color.readable(scheme)).frame(width: 14); Text(p.name).font(.system(size: 12)).lineLimit(1) }.help(p.path)
-                    }.width(min: 150, ideal: 210)
+                    }.width(min: 140, ideal: 170)
                     TableColumn("PID", value: \.pidSort) { p in Text("\(p.pid)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary) }.width(55)
                     TableColumn("CPU of machine", value: \.cpu) { p in
                         HStack(spacing: 6) {
@@ -922,14 +923,14 @@ struct ProcessesView: View {
                     }.width(110)
                     TableColumn("Memory", value: \.mem) { p in Text(Fmt.bytes(p.mem)).font(.system(size: 11, design: .monospaced)).lineLimit(1).foregroundStyle(p.mem > 4_000_000_000 ? Aspect.memory.color.readable(scheme) : .primary) }.width(80)
                     TableColumn("Disk", value: \.diskSort) { p in Text(p.isOwn ? Fmt.rate(p.diskRead + p.diskWrite) : "—").font(.system(size: 10.5, design: .monospaced)).lineLimit(1).foregroundStyle(.secondary) }.width(75)
-                    TableColumn("Group", value: \.group) { p in Chip(text: p.group, color: Aspect.forGroup(p.group).color) }.width(min: 110, ideal: 160)
-                    TableColumn("Agent session") { p in if let s = p.session { SessionLink(id: s) } }.width(min: 120, ideal: 200)
+                    TableColumn("Group", value: \.group) { p in Chip(text: p.group, color: Aspect.forGroup(p.group).color) }.width(min: 90, ideal: 130)
+                    TableColumn("Agent session") { p in if let s = p.session { SessionLink(id: s) } }.width(min: 90, ideal: 140)
                     TableColumn("") { p in
                         HStack(spacing: 4) {
                             Button("Quit") { m.confirmQuit(p) }.buttonStyle(HUDButton(color: Aspect.process.color))
                             Button("Kill") { m.confirmQuit(p, force: true) }.buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E)))
                         }.disabled(Safety.processBlock(p) != nil).help(Safety.processBlock(p) ?? "")
-                    }.width(min: 110, ideal: 120)
+                    }.width(min: 110, ideal: 116)
                 }
                 .scrollContentBackground(.hidden)
                 .alternatingRowBackgrounds(.disabled)
@@ -1577,5 +1578,53 @@ struct LiveView: View {
                 if let data, let img = NSImage(data: data) { image = img; at = Date() }
             }
         }
+    }
+}
+
+/// What a confirmed action is doing: a spinner while it runs, then its result. A success fades after a
+/// few seconds; a failure stays until dismissed, so it can't go unnoticed.
+struct ActionBar: View {
+    @ObservedObject private var m = Monitor.shared
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        let hud = HUD(scheme: scheme)
+        VStack(spacing: 6) {
+            ForEach(m.working, id: \.self) { t in
+                row {
+                    ProgressView().controlSize(.small)
+                    Text("\(t) · working…").font(.system(size: 12, weight: .semibold))
+                }.overlay(Rectangle().strokeBorder(hud.accent.opacity(0.6), lineWidth: 0.8))
+            }
+            if let o = m.outcome {
+                let color = o.failed ? Color(hex: 0xFF4D5E) : Color(hex: 0x3DDC97)
+                row {
+                    Image(systemName: o.failed ? "xmark.octagon.fill" : "checkmark.circle.fill").foregroundStyle(color)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(o.failed ? "\(o.title) failed" : o.title).font(.system(size: 12, weight: .semibold))
+                        Text(o.text).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    }
+                    Spacer(minLength: 8)
+                    Button { m.outcome = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain).help("Dismiss")
+                }
+                .overlay(Rectangle().strokeBorder(color.opacity(0.8), lineWidth: 1))
+                .task(id: o.id) {
+                    guard !o.failed else { return }
+                    try? await Task.sleep(for: .seconds(8))
+                    if m.outcome?.id == o.id { m.outcome = nil }
+                }
+            }
+        }
+        .frame(maxWidth: 620)
+        .animation(.easeOut(duration: 0.2), value: m.working)
+        .animation(.easeOut(duration: 0.2), value: m.outcome)
+    }
+
+    func row<C: View>(@ViewBuilder _ c: () -> C) -> some View {
+        HStack(spacing: 10) { c() }
+            .padding(.horizontal, 14).padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Rectangle().fill(HUD(scheme: scheme).panel))
+            .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
     }
 }

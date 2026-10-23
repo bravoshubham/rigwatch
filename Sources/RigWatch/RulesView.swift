@@ -25,9 +25,13 @@ struct RulesView: View {
                 rules
                 HStack(spacing: 10) {
                     SectionTitle(title: preview ? "Clean-up preview" : "Last clean-up", aspect: .rules, count: report?.actions.count)
-                    Button(previewing ? "Checking" : "Preview") { runPreview() }.buttonStyle(HUDButton(color: Aspect.rules.color)).disabled(previewing)
+                    let cleaning = m.busy.contains(Self.cleanTitle)
+                    Button(previewing ? "Checking" : "Preview") { runPreview() }.buttonStyle(HUDButton(color: Aspect.rules.color)).disabled(previewing || cleaning)
                         .help("What the clean-up would do now. Changes nothing.")
-                    Button { confirmCleanup() } label: { Label("Clean up now", systemImage: "sparkles") }.buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E)))
+                    Button { confirmCleanup() } label: {
+                        if cleaning { HStack(spacing: 6) { ProgressView().controlSize(.mini); Text("Cleaning…") } }
+                        else { Label("Clean up now", systemImage: "sparkles") }
+                    }.buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E))).disabled(cleaning || previewing)
                 }
                 cleanup
                 SectionTitle(title: "Log", aspect: .process, count: log.count)
@@ -187,10 +191,19 @@ struct RulesView: View {
     @ViewBuilder var cleanup: some View {
         Panel(aspect: .rules, padding: 12) {
             VStack(alignment: .leading, spacing: 9) {
+                if m.busy.contains(Self.cleanTitle) {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Cleaning up now. Worktrees are measured and removed one at a time, so this can take a few minutes; the result shows here when it is done.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }.padding(.bottom, 4)
+                }
                 if let r = report {
                     HStack(spacing: 8) {
                         Text(Rules.stamp.string(from: r.at)).font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        let failures = r.actions.filter(\.failed).count
                         Chip(text: preview ? "PREVIEW" : r.applied ? "APPLIED" : "REPORTED ONLY", color: r.applied ? Color(hex: 0x3DDC97) : Color(hex: 0xFFD23F), filled: r.applied)
+                        if !preview && failures > 0 { Chip(text: "\(failures) FAILED", color: Color(hex: 0xFF4D5E), filled: true) }
                         let total = r.actions.filter { $0.kind != "Shut down" }.compactMap(\.bytes).reduce(0, +)
                         if total > 0 { Text("\(r.applied ? "freed" : "would free") ~\(Fmt.bytes(total)) of disk").hudLabel(Color(hex: 0x3DDC97).readable(scheme)) }
                     }
@@ -221,7 +234,13 @@ struct RulesView: View {
             Text(a.detail).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2).help(a.detail)
             Spacer(minLength: 8)
             if let b = a.bytes, b > 0 { Text(Fmt.bytes(b) + (device ? " RAM" : "")).font(.system(size: 11, weight: .semibold, design: .monospaced)).fixedSize() }
-            if let res = a.result { Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Color(hex: 0x3DDC97)).help(res) }
+            if let res = a.result {
+                let (icon, color): (String, Color) = a.outcome == "failed" ? ("xmark", Color(hex: 0xFF4D5E)) : a.outcome == "kept" ? ("minus", Color(hex: 0xFFD23F)) : ("checkmark", Color(hex: 0x3DDC97))
+                if a.outcome == "failed" || a.outcome == "kept" {
+                    Text(res).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(color.readable(scheme)).lineLimit(2).help(res)
+                }
+                Image(systemName: icon).font(.system(size: 10, weight: .bold)).foregroundStyle(color).help(res)
+            }
             if device {
                 let pinned = pins.contains(a.key)
                 Button(pinned ? "Unpin" : "Pin") { if !Demo.on { Rules.setPin(a.key, !pinned); pins = Rules.pins() } }
@@ -239,14 +258,23 @@ struct RulesView: View {
         }
     }
 
+    static let cleanTitle = "Clean up now?"
+
     func confirmCleanup() {
         var msg = "Runs every rule that is on, now: shuts down idle emulators and simulators, removes clean idle worktrees, strips build output from the rest and deletes orphaned DerivedData. Nothing with uncommitted or unpushed work is removed."
         if preview, let r = report { msg += r.actions.isEmpty ? "\n\nThe preview found nothing to do." : "\n\nThe preview found \(r.actions.count): " + r.actions.prefix(6).map { "\($0.kind.lowercased()) \($0.target)" }.joined(separator: "; ") + (r.actions.count > 6 ? "; …" : "") }
         else { msg += "\n\nPress Preview first to see the list." }
-        m.pending = Pending(title: "Clean up now?", message: msg, button: "Clean Up") {
+        if s.paused { msg = "Rules are paused, so this only reports what it would do: nothing is shut down, removed or deleted.\n\n" + msg }
+        m.pending = Pending(title: Self.cleanTitle, message: msg, button: "Clean Up") {
             let r = Rules.reap(apply: true, explicit: true)
             Rules.saveReport(r)
-            return r.notes.first { $0.hasPrefix("Another") } ?? (r.actions.isEmpty ? "Nothing to clean up." : "Done: \(r.actions.count) action(s). See Last clean-up.")
+            if let note = r.notes.first(where: { $0.hasPrefix("Another") || $0.hasPrefix("Rules are paused") }) { return note }
+            if r.actions.isEmpty { return "Clean-up finished: nothing to clean up." }
+            let failed = r.actions.filter(\.failed).count, kept = r.actions.filter { $0.outcome == "kept" }.count
+            var msg = "Clean-up finished: \(r.actions.count - failed - kept) done"
+            if kept > 0 { msg += ", \(kept) kept by a safety check" }
+            if failed > 0 { msg += ", \(failed) FAILED" }
+            return msg + ". Details under Last clean-up."
         }
         preview = false
     }
