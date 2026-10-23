@@ -82,9 +82,13 @@ at once, desktop app and terminal alike:
 
 - **Queue heavy builds.** Gradle, `xcodebuild` and npm, yarn or pod installs wait for a free slot
   (Android and iOS have their own: 2 and 1 at once by default, fewer under memory pressure), first
-  come first served within each, at a priority that
-  keeps the rest of the Mac responsive, with a thread cap each. A session whose build has to wait gets
-  it moved to the background and keeps working.
+  come first served within each, at a priority that keeps the rest of the Mac responsive, with a
+  thread cap each. A slot is held only while the build tool itself runs, not while the rest of the
+  command (installs, logcat, waits) does, and no build waits longer than 10 minutes: then it starts
+  anyway, at background priority. A session whose build has to wait gets it moved to the background
+  and keeps working. Builds the hook can't see (inside scripts and other tools) and Gradle's daemons
+  run at lower priority instead. The **Builds** page shows what holds a slot, what waits and until
+  when, what runs outside the queue, and recent builds, with Start now, Cancel and Stop.
 - **Physical devices first.** Booting an emulator or simulator is refused while a phone of that kind
   is connected or another virtual one is already running. `RIGWATCH_VIRTUAL=1` in front of the command
   lets it through.

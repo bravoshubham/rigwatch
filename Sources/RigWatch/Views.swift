@@ -57,6 +57,7 @@ struct RootView: View {
                     case .overview: OverviewView()
                     case .devices: DevicesView()
                     case .deviceManager: DeviceManagerView()
+                    case .builds: BuildsView()
                     case .sessions: SessionsView()
                     case .servers: DevServersView()
                     case .processes: ProcessesView()
@@ -175,6 +176,7 @@ struct Sidebar: View {
         switch p {
         case .devices: let n = m.emulatorCount + m.simulatorCount; return n > 0 ? String(format: "%02d", n) : nil
         case .deviceManager: let n = m.leases.count; return n > 0 ? String(format: "%02d", n) : nil
+        case .builds: let n = m.jobs.count + m.outside.count; return n > 0 ? String(format: "%02d", n) : nil
         case .sessions: let n = m.sessions.filter(\.live).count; return n > 0 ? String(format: "%02d", n) : nil
         case .worktrees: let n = m.worktrees.filter { !$0.isMain }.count; return n > 0 ? String(format: "%02d", n) : nil
         case .servers: let n = m.servers.count; return n > 0 ? String(format: "%02d", n) : nil

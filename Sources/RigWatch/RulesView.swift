@@ -167,10 +167,12 @@ struct RulesView: View {
         return Panel(aspect: .rules, padding: 14) {
             VStack(alignment: .leading, spacing: 14) {
                 rule("Queue heavy builds", $s.queueBuilds,
-                     "Gradle, xcodebuild and npm, yarn or pod installs from every agent session wait for a free slot, first come first served, and run at a priority that leaves the rest of the Mac responsive. Android (Gradle, npm, yarn) and iOS (xcodebuild, pod) have their own slots, so one platform's builds never wait behind the other's. Half of all builds under a memory pressure warning, one at a time when it is critical.") {
+                     "Gradle, xcodebuild and npm, yarn or pod installs from every agent session wait for a free slot, first come first served, and run at a priority that leaves the rest of the Mac responsive. Android (Gradle, npm, yarn) and iOS (xcodebuild, pod) have their own slots, so one platform's builds never wait behind the other's. Half of all builds under a memory pressure warning, one at a time when it is critical. A slot is held only while the build tool runs, and no build waits longer than the limit: then it starts anyway, at background priority. Builds outside the queue (scripts, tools the hook can't see into) and Gradle's daemons run at lower priority. The Builds page shows all of it.") {
                     Stepper(value: $s.androidBuilds, in: 1...6) { setting("Android \(s.androidBuilds) at once") }
                     Stepper(value: $s.iosBuilds, in: 1...6) { setting("iOS \(s.iosBuilds) at once") }
                     Stepper(value: $s.buildThreads, in: 1...max(1, cores)) { setting("\(s.buildThreads) threads each") }
+                    Stepper(value: $s.maxWaitMinutes, in: 2...60) { setting("waits at most \(s.maxWaitMinutes) min") }
+                    Toggle(isOn: $s.lowerOutside) { setting("lower builds outside the queue") }.toggleStyle(.checkbox).controlSize(.small)
                 }
                 rule("Physical devices first", $s.physicalFirst,
                      "Booting an emulator or simulator is refused while a phone of that kind is connected, or another virtual one is already running. Putting RIGWATCH_VIRTUAL=1 in front of the command lets it through.") { EmptyView() }

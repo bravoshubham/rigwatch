@@ -9,6 +9,8 @@ struct RuleSettings: Codable, Equatable {
     var queueBuilds = true
     var androidBuilds = 2        // builds at once in each pool: an Android build never waits behind an iOS one
     var iosBuilds = 1
+    var maxWaitMinutes = 10      // a build never waits longer: then it starts anyway, at background priority
+    var lowerOutside = true      // builds outside the queue, and Gradle's daemons, run at lower priority
     var buildThreads = max(2, ProcessInfo.processInfo.activeProcessorCount / 3)
     var physicalFirst = true
     var reapDevices = true
@@ -52,6 +54,10 @@ struct BuildJob: Codable, Identifiable {
     let cmd: String
     var state: String            // waiting, running
     var since: Date
+    var session: String?         // the agent session that started it
+    var queuedAt: Date?
+    var overflow: Bool?          // started after waiting the longest allowed, at background priority
+    var force: Bool?             // "Start now" from the Builds page
     var id: Int32 { pid }
     var alive: Bool { ProcSampler.startTime(pid) == start }
 }
@@ -412,10 +418,14 @@ enum Rules {
         guard !a.isEmpty else { say("RigWatch run: no command"); return 2 }
         let s = RuleSettings.load(), line = a.joined(separator: " ")
         let k = kind ?? classify(line) ?? "gradle"
+        let session = ProcessInfo.processInfo.environment["CLAUDE_CODE_SESSION_ID"]
         let me = BuildJob(pid: getpid(), start: ProcSampler.startTime(getpid()) ?? 0, kind: k, weight: weights[k] ?? 2,
-                          cwd: FileManager.default.currentDirectoryPath, cmd: String(line.suffix(200)), state: "waiting", since: Date())
+                          cwd: FileManager.default.currentDirectoryPath, cmd: String(line.suffix(200)), state: "waiting", since: Date(),
+                          session: session, queuedAt: Date())
         withJobs { $0.append(me) }
-        let release = { withJobs { j in j.removeAll { $0.pid == me.pid } } }
+        let slot = NSLock()
+        var held = true   // the slot is ours until the build tool exits or the command ends
+        let release = { slot.lock(); defer { slot.unlock() }; if held { held = false; withJobs { j in j.removeAll { $0.pid == me.pid } } } }
         var sources: [DispatchSourceSignal] = []
         for sig in [SIGTERM, SIGINT, SIGHUP] {
             signal(sig, SIG_IGN)   // the child gets default handlers back (POSIX_SPAWN_SETSIGDEF)
@@ -424,29 +434,84 @@ enum Rules {
             src.resume(); sources.append(src)
         }
         let queue = s.queueBuilds && !s.paused, p = pool(me)
-        let t0 = Date()
-        var last = ""
+        let t0 = Date(), maxWait = TimeInterval(max(1, s.maxWaitMinutes) * 60)
+        var last = "", overflow = false, forced = false
         while true {
+            let waited = Date().timeIntervalSince(t0)
             let ahead: [BuildJob]? = withJobs { j in
                 guard let i = j.firstIndex(where: { $0.pid == me.pid }) else { j.append(me); return [] }
                 // First come, first served within the pool; the other pool's line does not hold this one up.
                 let head = j.filter { $0.state == "waiting" && pool($0) == p }.min { $0.since < $1.since }
-                if !queue || (head?.pid == me.pid && fits(p, me.weight, j, s)) {
-                    j[i].state = "running"; j[i].since = Date(); return nil
+                if j[i].force == true { forced = true }
+                else if queue, !(head?.pid == me.pid && fits(p, me.weight, j, s)) {
+                    // Never wait for ever: past the limit it starts anyway, at background priority.
+                    guard waited > maxWait else { return j.filter { pool($0) == p && ($0.state == "running" || ($0.state == "waiting" && $0.since < me.since)) } }
+                    overflow = true; j[i].overflow = true
                 }
-                return j.filter { pool($0) == p && ($0.state == "running" || ($0.state == "waiting" && $0.since < me.since)) }
+                j[i].state = "running"; j[i].since = Date(); return nil
             }
             guard let ahead else { break }
             let msg = ahead.map { "\($0.kind) \($0.state) in \(($0.cwd as NSString).lastPathComponent)" }.joined(separator: "; ")
-            if msg != last { say("RigWatch: queued for an \(p == "ios" ? "iOS" : "Android") slot behind: \(msg.ifEmpty("memory pressure, which halves all builds"))"); last = msg }
+            if msg != last {
+                let by = t0.addingTimeInterval(maxWait).formatted(date: .omitted, time: .shortened)
+                say("RigWatch: queued for an \(p == "ios" ? "iOS" : "Android") slot behind: \(msg.ifEmpty("memory pressure, which halves all builds")). It starts by \(by) at the latest.")
+                last = msg
+            }
             Thread.sleep(forTimeInterval: 2)
         }
-        if Date().timeIntervalSince(t0) > 3 { say("RigWatch: slot granted after \(Int(Date().timeIntervalSince(t0))) s") }
+        let waited = Date().timeIntervalSince(t0)
+        if overflow { say("RigWatch: waited \(Int(waited / 60)) min for a slot; starting now at background priority, so it can't slow the Mac down.") }
+        else if forced { say("RigWatch: started from the Builds page after \(Int(waited)) s.") }
+        else if waited > 3 { say("RigWatch: slot granted after \(Int(waited)) s") }
         if k != "install" { for r in roots(line, cwd: me.cwd) { ensureNodeModules(r) } }
-        let code = spawn(["/usr/sbin/taskpolicy", "-c", "utility"] + a)
+        // The slot is for the build tool itself: once it has run and exited, the rest of the command
+        // (installs, logcat, waits) goes on without holding back the next build.
+        var early = false
+        if let tools = buildTools[k] {
+            Thread.detachNewThread {
+                var saw = false, absent = 0
+                while true {
+                    Thread.sleep(forTimeInterval: 3)
+                    let c = child
+                    guard c > 0 else { if saw { return } else { continue } }
+                    let running = descendants(of: c).contains { tools.contains($0.name) }
+                    if running { saw = true; absent = 0 } else if saw { absent += 1 }
+                    if saw && absent >= 2 {
+                        release(); early = true
+                        say("RigWatch: the \(k) build finished; its slot is free while the rest of the command runs.")
+                        return
+                    }
+                }
+            }
+        }
+        let started = Date()
+        let code = spawn((overflow ? ["/usr/sbin/taskpolicy", "-b"] : ["/usr/sbin/taskpolicy", "-c", "utility"]) + a)
         release()
+        BuildHistory.add(BuildRecord(kind: k, pool: p, cwd: me.cwd, cmd: me.cmd, session: session, queuedAt: t0, startedAt: started,
+                                     endedAt: Date(), waited: waited, overflow: overflow, forced: forced, releasedEarly: early, exit: code))
         withExtendedLifetime(sources) {}
         return code
+    }
+
+    /// The process that does the work of each kind of build: the slot is held while one runs.
+    static let buildTools: [String: Set<String>] = ["xcodebuild": ["xcodebuild"], "gradle": ["java"]]
+
+    /// Every process under `pid`, from the kernel's process list (no ps).
+    static func descendants(of pid: pid_t) -> [(pid: pid_t, name: String)] {
+        var n = proc_listallpids(nil, 0)
+        guard n > 0 else { return [] }
+        var pids = [pid_t](repeating: 0, count: Int(n) + 64)
+        n = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        var kids: [pid_t: [(pid_t, String)]] = [:]
+        for p in pids.prefix(Int(max(n, 0))) where p > 0 {
+            var info = proc_bsdinfo()
+            guard proc_pidinfo(p, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) > 0 else { continue }
+            let name = withUnsafeBytes(of: &info.pbi_comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            kids[pid_t(info.pbi_ppid), default: []].append((p, name))
+        }
+        var out: [(pid: pid_t, name: String)] = [], stack = [pid]
+        while let x = stack.popLast() { for (c, nm) in kids[x] ?? [] { out.append((c, nm)); stack.append(c) } }
+        return out
     }
 
     static func spawn(_ argv: [String]) -> Int32 {
@@ -578,6 +643,7 @@ enum Rules {
         r.applied = apply
         trimLog()
         let procs = ProcSampler().sample()
+        if apply { _ = BuildGovernor().apply(procs) }   // with the app closed, the clean-up governs builds outside the queue
         if s.reapDevices { reapDevices(&r, s, procs, apply: apply) }
         let diskStamp = dir + "/last-disk-reap"
         if explicit || !apply || (mtime(diskStamp).map { Date().timeIntervalSince($0) > 3600 } ?? true) {
@@ -916,5 +982,72 @@ enum CLI {
         default: print(usage)
         }
         return 0
+    }
+}
+
+/// One finished build that went through the queue, for the Builds page.
+struct BuildRecord: Codable, Identifiable {
+    let kind: String, pool: String, cwd: String, cmd: String
+    let session: String?
+    let queuedAt: Date, startedAt: Date, endedAt: Date
+    let waited: TimeInterval
+    let overflow: Bool, forced: Bool, releasedEarly: Bool
+    let exit: Int32
+    var id: Date { queuedAt }
+    var ran: TimeInterval { endedAt.timeIntervalSince(startedAt) }
+}
+
+enum BuildHistory {
+    static let file = Rules.dir + "/builds.jsonl"
+    static func add(_ r: BuildRecord) {
+        guard let d = try? JSONEncoder().encode(r) else { return }
+        let line = d + Data("\n".utf8)
+        if let h = FileHandle(forWritingAtPath: file) { h.seekToEndOfFile(); h.write(line); try? h.close() } else { Rules.write(line, to: file) }
+        // Keep the file small: the last 500 builds.
+        if let all = try? String(contentsOfFile: file, encoding: .utf8) {
+            let lines = all.split(separator: "\n")
+            if lines.count > 600 { Rules.write(Data((lines.suffix(500).joined(separator: "\n") + "\n").utf8), to: file) }
+        }
+    }
+    /// Newest first.
+    static func recent(_ n: Int = 50) -> [BuildRecord] {
+        guard let all = try? String(contentsOfFile: file, encoding: .utf8) else { return [] }
+        return all.split(separator: "\n").suffix(n).reversed().compactMap { try? JSONDecoder().decode(BuildRecord.self, from: Data($0.utf8)) }
+    }
+}
+
+/// Builds that don't go through the queue still can't take the Mac over: while the rules are on, the app
+/// lowers the priority (nice 10) of every build outside the queue and its child processes, and of Gradle's
+/// and Kotlin's daemons, which do a Gradle build's work in processes of their own. Own processes only.
+final class BuildGovernor {
+    static let nice: Int32 = 10
+    /// RIGWATCH_GOVERN=1 governs without the hook installed (for testing on a Mac with the rules off).
+    static var active: Bool {
+        let s = RuleSettings.load()
+        return s.lowerOutside && !s.paused && (Rules.hookInstalled() || ProcessInfo.processInfo.environment["RIGWATCH_GOVERN"] == "1")
+    }
+
+    /// Lowers what needs lowering; returns every process now running at the lowered priority because of it.
+    func apply(_ procs: [Proc]) -> Set<Int32> {
+        guard Self.active else { return [] }
+        var kids: [Int32: [Int32]] = [:]
+        for p in procs { kids[p.ppid, default: []].append(p.pid) }
+        var targets = Set<Int32>()
+        for b in Rules.outsideQueue(procs) {
+            var stack = [b.pid]
+            while let x = stack.popLast() { targets.insert(x); stack += kids[x] ?? [] }
+        }
+        for p in procs where p.isOwn && p.name == "java" && p.args.contains(where: { $0.contains("GradleDaemon") || $0.contains("KotlinCompileDaemon") }) {
+            targets.insert(p.pid)
+        }
+        let me = getuid()
+        var lowered = Set<Int32>()
+        for pid in targets where procs.first(where: { $0.pid == pid })?.uid == me {
+            errno = 0
+            let cur = getpriority(PRIO_PROCESS, id_t(pid))
+            if errno != 0 { continue }
+            if cur >= Self.nice || setpriority(PRIO_PROCESS, id_t(pid), Self.nice) == 0 { lowered.insert(pid) }
+        }
+        return lowered
     }
 }

@@ -2,12 +2,12 @@ import AppKit
 import Foundation
 
 enum Page: String, CaseIterable, Identifiable {
-    case overview = "Overview", devices = "Emulators & Simulators", deviceManager = "Device Manager", sessions = "Agent Sessions", servers = "Dev Servers",
+    case overview = "Overview", devices = "Emulators & Simulators", deviceManager = "Device Manager", builds = "Builds", sessions = "Agent Sessions", servers = "Dev Servers",
          processes = "Processes", memory = "Memory", worktrees = "Worktrees", disk = "Disk", rules = "Rules"
     var id: String { rawValue }
     var icon: String {
         switch self {
-        case .overview: "gauge.with.dots.needle.33percent"; case .devices: "iphone.gen3"; case .deviceManager: "key"; case .sessions: "bubble.left.and.text.bubble.right"; case .servers: "server.rack"
+        case .overview: "gauge.with.dots.needle.33percent"; case .devices: "iphone.gen3"; case .deviceManager: "key"; case .builds: "hammer"; case .sessions: "bubble.left.and.text.bubble.right"; case .servers: "server.rack"
         case .processes: "cpu"; case .memory: "memorychip"; case .worktrees: "arrow.triangle.branch"; case .disk: "internaldrive"; case .rules: "slider.horizontal.3"
         }
     }
@@ -53,6 +53,11 @@ final class Monitor: ObservableObject {
     @Published var top: TopKind?                         // the Top CPU / Top memory sheet, when open
     @Published var asks: [Ask] = []                      // open "is it safe to shut down?" questions (asks.json)
     @Published var leases: [Lease] = []                  // devices lent to agent sessions (leases.json)
+    @Published var jobs: [BuildJob] = []                 // builds holding or waiting for a slot (jobs.json)
+    @Published var outside: [Rules.OutsideBuild] = []    // builds running outside the queue
+    @Published var governed: Set<Int32> = []             // processes running at lowered priority because of BuildGovernor
+    @Published var buildHistory: [BuildRecord] = []      // finished queued builds, newest first
+    private var historyAt = Date.distantPast
     @Published var bootable: (avds: [String], sims: [DeviceManager.Sim])?   // what acquire_device could boot, for the Device Manager page
     private var bootableAt = Date.distantPast
     /// The last 15 minutes, in memory only. Not @Published: a hidden-window sample would otherwise wake
@@ -69,6 +74,8 @@ final class Monitor: ObservableObject {
     private let procSampler = ProcSampler()
     private let sysSampler = SystemSampler()
     private let devSampler = DeviceSampler()
+    private let governor = BuildGovernor()
+    private var governedAt = Date.distantPast           // touched on the sampling queue only
     private let index = SessionIndex()
     private let agents = AgentIndex()
     private let serverScanner = DevServerScanner()
@@ -171,7 +178,10 @@ final class Monitor: ObservableObject {
         q.async { [procSampler, sysSampler, devSampler, index, agents, serverScanner] in
             let s = sysSampler.sample()
             guard visible else {
-                DispatchQueue.main.async { self.sys = s; self.record(s, nil, nil); self.running = false }
+                // Builds outside the queue are governed with the window closed too, every 10 s.
+                var gov: Set<Int32>?
+                if !Demo.on, Date().timeIntervalSince(self.governedAt) > 10 { self.governedAt = Date(); gov = self.governor.apply(procSampler.sample()) }
+                DispatchQueue.main.async { self.sys = s; self.record(s, nil, nil); if let gov { self.governed = gov }; self.running = false }
                 return
             }
             let ps = procSampler.sample()
@@ -190,6 +200,9 @@ final class Monitor: ObservableObject {
             let owner = agents.owner
             let mentions = index.mentions
             let leases = Demo.on ? [] : Leases.live()   // every refresh: the sidebar counts them on any page
+            let jobs = Demo.on ? [] : Rules.jobs(), outside = Demo.on ? [] : Rules.outsideQueue(ps)
+            let governed = Demo.on ? [] : self.governor.apply(ps)
+            let buildHistory: [BuildRecord]? = tab == .builds && Date().timeIntervalSince(self.historyAt) > 5 ? BuildHistory.recent(40) : nil
             let actions = index.lastAction
             DispatchQueue.main.async {
                 self.sys = s; self.procs = ps; self.groups = groups; self.sessions = sess; self.servers = servers; self.agentOwner = owner
@@ -200,6 +213,9 @@ final class Monitor: ObservableObject {
                     if asks != self.asks { self.asks = asks }
                 }
                 if leases != self.leases { self.leases = leases }
+                self.jobs = jobs; self.outside = outside
+                if governed != self.governed { self.governed = governed }
+                if let buildHistory { self.buildHistory = buildHistory; self.historyAt = Date() }
                 self.selfCPU = own?.cpu ?? 0; self.selfMem = own?.mem ?? 0
                 self.record(s, ps, groups)
                 self.running = false
@@ -530,6 +546,55 @@ final class Monitor: ObservableObject {
             }
             return r
         }
+    }
+
+    // MARK: builds
+
+    /// Lets a waiting build start at once, ahead of the line.
+    func startBuildNow(_ j: BuildJob) {
+        perform("Start \(j.kind) now") {
+            let hit: Bool = Rules.withJobs { list in
+                guard let i = list.firstIndex(where: { $0.pid == j.pid && $0.state == "waiting" }) else { return false }
+                list[i].force = true; return true
+            }
+            guard hit else { return "That build is no longer waiting." }
+            Rules.log("builds: started \(j.kind) in \(Views.tilde(j.cwd)) ahead of the queue from the app")
+            return "\(j.kind) in \((j.cwd as NSString).lastPathComponent) starts within 2 s, ahead of the line."
+        }
+    }
+
+    /// Stops a queued build (running or waiting): RigWatch run passes SIGTERM on to the build.
+    func confirmStopBuild(_ j: BuildJob) {
+        let what = j.state == "waiting" ? "Cancel Build" : "Stop"   // not "Cancel": the dialog's own dismiss button says that
+        var msg = "\(j.kind) in \(Views.tilde(j.cwd))\(j.session.map { " for \(sessionLabel($0))" } ?? "")\n$ \(j.cmd.prefix(200))"
+        msg += j.state == "waiting" ? "\n\nIt has not started; the agent's command ends with an error." : "\n\nSends SIGTERM to the build; the agent's command ends with an error and the agent may run it again."
+        pending = Pending(title: j.state == "waiting" ? "Cancel this build?" : "Stop this build?", message: msg, button: what) {
+            guard ProcSampler.startTime(j.pid) == j.start else { return "That build has already finished." }
+            kill(j.pid, SIGTERM)
+            let done = j.state == "waiting" ? "Cancelled" : "Stopped"
+            Rules.log("builds: \(done.lowercased()) \(j.kind) in \(Views.tilde(j.cwd)) from the app")
+            return "\(done) \(j.kind) in \((j.cwd as NSString).lastPathComponent)."
+        }
+    }
+
+    func confirmStopOutside(_ b: Rules.OutsideBuild) {
+        var msg = "\(b.kind) (pid \(b.pid))\(b.cwd.map { " in \(Views.tilde($0))" } ?? "")\(b.session.map { " for \(sessionLabel($0))" } ?? "")"
+        msg += "\n\nIt runs outside RigWatch's queue (\(b.reason)). Sends SIGTERM; whatever started it sees the build fail."
+        pending = Pending(title: "Stop this build?", message: msg, button: "Stop") {
+            guard kill(b.pid, 0) == 0 else { return "That build has already finished." }
+            kill(b.pid, SIGTERM)
+            Rules.log("builds: stopped \(b.kind) pid \(b.pid) outside the queue from the app")
+            return "Sent SIGTERM to \(b.kind) (pid \(b.pid))."
+        }
+    }
+
+    /// CPU of a process and everything under it.
+    func treeCPU(_ pid: Int32) -> Double {
+        var kids: [Int32: [Int32]] = [:]
+        for p in procs { kids[p.ppid, default: []].append(p.pid) }
+        var cpu = 0.0, stack = [pid]
+        while let x = stack.popLast() { cpu += procIndex[x]?.cpu ?? 0; stack += kids[x] ?? [] }
+        return cpu
     }
 
     // MARK: device manager

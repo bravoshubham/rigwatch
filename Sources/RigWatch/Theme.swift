@@ -57,7 +57,7 @@ enum Aspect: CaseIterable {
 extension Page {
     var aspect: Aspect {
         switch self {
-        case .overview: .gpu; case .devices: .android; case .deviceManager: .android; case .sessions: .claude; case .servers: .server; case .processes: .cpu
+        case .overview: .gpu; case .devices: .android; case .deviceManager: .android; case .builds: .cpu; case .sessions: .claude; case .servers: .server; case .processes: .cpu
         case .memory: .memory; case .worktrees: .worktree; case .disk: .disk; case .rules: .rules
         }
     }
