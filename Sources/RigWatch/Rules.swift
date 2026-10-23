@@ -379,9 +379,11 @@ enum Rules {
         posix_spawnattr_setsigmask(&attr, &none)
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
         let c = argv.map { strdup($0) } + [nil]
-        defer { c.forEach { free($0) } }
+        // The environment from Foundation: `_NSGetEnviron` is not visible to Swift in every macOS SDK.
+        let env = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer { c.forEach { free($0) }; env.forEach { free($0) } }
         var pid: pid_t = 0
-        let rc = posix_spawn(&pid, argv[0], nil, &attr, c, _NSGetEnviron().pointee)
+        let rc = posix_spawn(&pid, argv[0], nil, &attr, c, env)
         guard rc == 0 else { say("RigWatch run: could not start \(argv[0]): \(String(cString: strerror(rc)))"); return 127 }
         child = pid
         var st: Int32 = 0
