@@ -688,9 +688,9 @@ struct DeviceCard: View {
                 VStack(alignment: .leading, spacing: 6) {
                     if let l = d.lease {
                         HStack(spacing: 6) {
-                            Chip(text: "LEASED", icon: "key.fill", color: Color(hex: 0x3DDC97)).fixedSize()
+                            Chip(text: l.isImplicit ? "IN USE" : "LEASED", icon: l.isImplicit ? "hand.raised.fill" : "key.fill", color: Color(hex: l.isImplicit ? 0xFF8A3D : 0x3DDC97)).fixedSize()
                             SessionLink(id: l.session)
-                            Text("until \(Leases.time(l.until))\(l.purpose.isEmpty ? "" : " · " + l.purpose)")
+                            Text(l.isImplicit ? "used directly, not through the device manager" : "until \(Leases.time(l.until))\(l.purpose.isEmpty ? "" : " · " + l.purpose)")
                                 .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                         }.help("Lent to this agent session by RigWatch's device manager (MCP acquire_device). No other session is given it and the clean-up leaves it alone until the lease ends.")
                     }

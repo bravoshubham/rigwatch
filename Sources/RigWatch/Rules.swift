@@ -622,7 +622,7 @@ enum Rules {
             let idle = now.timeIntervalSince(last)
             let name = "\(d.name) (\(d.id))"
             if pinned.contains(d.id) || pinned.contains(d.name) { r.kept.append("\(name): pinned"); continue }
-            if let l = d.lease { r.kept.append("\(name): leased to session \(l.session) until \(Leases.time(l.until))"); continue }
+            if let l = d.lease { r.kept.append("\(name): \(l.isImplicit ? "in use by" : "leased to") session \(l.session)\(l.isImplicit ? "" : " until \(Leases.time(l.until))")"); continue }
             if let c = d.claim { r.kept.append("\(name): held by agent-device for session \(c.session)"); continue }
             // Only what an agent started: a device a person opened may be in use without any command naming it.
             guard d.launchedBy != nil || agentBooted(d) else { r.kept.append("\(name): not started by an agent session"); continue }
@@ -873,7 +873,7 @@ enum Rules {
             out.append("\(plat): physical \(phys.isEmpty ? "none" : phys.joined(separator: ", ")); virtual \(virt.isEmpty ? "none" : virt.map { "\($0.name) \($0.id) up \(Fmt.ago($0.started).replacingOccurrences(of: " ago", with: ""))" }.joined(separator: ", "))")
         }
         let leases = Leases.live()
-        out.append("leases: " + (leases.isEmpty ? "none" : leases.map { "\($0.name) (\($0.device)) to session \($0.session) until \(Leases.time($0.until))\($0.purpose.isEmpty ? "" : " for \"\($0.purpose)\"")" }.joined(separator: "; ")))
+        out.append("leases: " + (leases.isEmpty ? "none" : leases.map { $0.isImplicit ? "\($0.device) in use by session \($0.session) (no lease)" : "\($0.name) (\($0.device)) to session \($0.session) until \(Leases.time($0.until))\($0.purpose.isEmpty ? "" : " for \"\($0.purpose)\"")" }.joined(separator: "; ")))
         out.append("pinned: \(pins().isEmpty ? "none" : pins().sorted().joined(separator: ", "))")
         if let r = lastReport() { out.append("last clean-up \(Fmt.ago(r.at)): \(r.actions.count) action(s)\(r.applied ? "" : ", reported only")") }
         return out.joined(separator: "\n")

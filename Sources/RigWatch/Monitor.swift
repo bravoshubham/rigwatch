@@ -561,7 +561,10 @@ final class Monitor: ObservableObject {
         var msg = "\(l.name) (\(l.device)) is leased to \(sessionLabel(l.session)) until \(Leases.time(l.until))"
         msg += l.purpose.isEmpty ? "." : " for \"\(l.purpose)\"."
         msg += "\n\nEnding the lease lets other sessions be given this device and lets the clean-up treat it as idle. The device keeps running; use Shut Down on its card to stop it. The session that held it gets an error the next time it renews or releases it, and may still be using it."
-        pending = Pending(title: "End the lease on \(l.name)?", message: msg, button: "End Lease") {
+        if l.isImplicit {
+            msg = "\(sessionLabel(l.session)) has been using \(l.name) directly (its commands name it), without a lease from the device manager.\n\nMarking it free lets acquire_device hand it to another session now. The session using it is not stopped and may still be using the device; its next command on it marks it in use again."
+        }
+        pending = Pending(title: l.isImplicit ? "Mark \(l.name) free?" : "End the lease on \(l.name)?", message: msg, button: l.isImplicit ? "Mark Free" : "End Lease") {
             let gone: Bool = Leases.edit { list in
                 let n = list.count
                 list.removeAll { $0.device == l.device && $0.session == l.session }

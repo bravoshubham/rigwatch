@@ -56,7 +56,7 @@ enum DeviceManager {
         let rows: [[String: Any]] = devs.filter { platform == nil || self.platform(of: $0) == platform }.map { d in
             var row: [String: Any] = ["id": d.id, "name": d.name, "platform": self.platform(of: d), "kind": d.kind.rawValue, "state": d.state]
             if let l = leases.first(where: { $0.covers(d) }) {
-                row["lease"] = ["yours": l.session == me, "session": l.session, "until": iso(l.until), "purpose": l.purpose]
+                row["lease"] = ["yours": l.session == me, "session": l.session, "until": iso(l.until), "purpose": l.purpose, "in_use_without_acquire": l.isImplicit]
             } else if let c = d.claim {
                 row["held_by_agent_device"] = ["session": c.session, "workspace": c.workspace]
             } else { row["free"] = true }
@@ -85,6 +85,9 @@ enum DeviceManager {
             let mine = devs.filter { d in self.platform(of: d) == platform && now.contains { $0.covers(d) && $0.session == me } && matches(d) }
             if let d = mine.first, let i = list.firstIndex(where: { $0.covers(d) }) {
                 list[i].until = max(list[i].until, until); if !purpose.isEmpty { list[i].purpose = purpose }
+                if list[i].isImplicit {   // it was using the device already: now it holds it properly
+                    list[i].implicit = nil; list[i].ownerPid = opid; list[i].ownerStart = ostart; list[i].name = d.name
+                }
                 return .success(.have(d, list[i]))
             }
             let free = devs.filter { self.platform(of: $0) == platform && !taken($0) && matches($0) }
@@ -223,8 +226,12 @@ enum DeviceManager {
         Rules.touch(sim.udid)
     }
 
-    static func adbSerials() -> [String] {
-        Sh.run(Sh.adb, ["devices"], timeout: 10).out.split(separator: "\n").dropFirst().compactMap { $0.split(separator: "\t").first.map(String.init) }
+    static func adbSerials(states: Set<String>? = nil) -> [String] {
+        Sh.run(Sh.adb, ["devices"], timeout: 10).out.split(whereSeparator: \.isNewline).dropFirst().compactMap { line -> String? in
+            let f = line.split(separator: "\t")
+            guard f.count == 2, states.map({ $0.contains(String(f[1])) }) ?? true else { return nil }
+            return String(f[0])
+        }
     }
 
     /// posix_spawn in a new session, output to a log file, with RigWatch's tool environment (which keeps the

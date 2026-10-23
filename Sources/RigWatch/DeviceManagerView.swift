@@ -7,14 +7,14 @@ struct DeviceManagerView: View {
     @Environment(\.colorScheme) private var scheme
     @State private var registered = Rules.mcpInstalled()
 
-    enum Hold: Int { case leased, held, free }
-    func hold(_ d: Device) -> Hold { d.lease != nil ? .leased : d.claim != nil ? .held : .free }
+    enum Hold: Int { case leased, inUse, held, free }
+    func hold(_ d: Device) -> Hold { d.lease.map { $0.isImplicit ? .inUse : .leased } ?? (d.claim != nil ? .held : .free) }
 
     var body: some View {
         let devs = m.devices
             .sorted { (hold($0).rawValue, $0.kind == .phone ? 0 : 1, $0.name) < (hold($1).rawValue, $1.kind == .phone ? 0 : 1, $1.name) }
         // A lease on an emulator still booting has no running device yet.
-        let booting = m.leases.filter { l in !m.devices.contains { l.covers($0) } }
+        let booting = m.leases.filter { l in l.device.hasPrefix("avd:") && !m.devices.contains { l.covers($0) } }
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header(devs)
@@ -50,9 +50,11 @@ struct DeviceManagerView: View {
 
     func header(_ devs: [Device]) -> some View {
         let leased = devs.filter { hold($0) == .leased }.count, held = devs.filter { hold($0) == .held }.count, free = devs.filter { hold($0) == .free }.count
+        let inUse = devs.filter { hold($0) == .inUse }.count
         return Panel(aspect: .android) {
             HStack(alignment: .center, spacing: 26) {
                 Readout(label: "Leased", value: "\(leased)", color: Color(hex: 0x3DDC97).readable(scheme), size: 30)
+                Readout(label: "In use, no lease", value: "\(inUse)", color: inUse > 0 ? Color(hex: 0xFF8A3D).readable(scheme) : .primary, size: 30)
                 Readout(label: "Free", value: "\(free)", size: 30)
                 Readout(label: "Held by agent-device", value: "\(held)", color: held > 0 ? Color(hex: 0xFFD23F).readable(scheme) : .primary, size: 30)
                 Spacer(minLength: 12)
@@ -105,6 +107,26 @@ struct DeviceManagerView: View {
 
     /// One lease: who holds it, for what, until when, with Extend and End.
     @ViewBuilder func lease(_ l: Lease, kind: String?) -> some View {
+        if l.isImplicit { inUse(l) } else { leased(l, kind: kind) }
+    }
+
+    /// A session using the device directly, without acquire_device: RigWatch saw its commands name it.
+    @ViewBuilder func inUse(_ l: Lease) -> some View {
+        let last = Date().addingTimeInterval(-(Leases.renewOnUse - l.until.timeIntervalSinceNow))
+        HStack(spacing: 6) {
+            Chip(text: "IN USE", icon: "hand.raised.fill", color: Color(hex: 0xFF8A3D), filled: true).fixedSize()
+            SessionLink(id: l.session)
+        }
+        HStack(spacing: 10) {
+            Text("last command on it \(Fmt.ago(last)) · not leased: it used the device directly, so RigWatch holds it for that session until \(Int(Leases.renewOnUse / 60)) min after its last use")
+                .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2)
+            Spacer(minLength: 6)
+            Button("Mark free") { m.confirmEndLease(l) }.buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E)))
+                .help("Let acquire_device hand it to other sessions now. The session using it is not stopped.")
+        }
+    }
+
+    @ViewBuilder func leased(_ l: Lease, kind: String?) -> some View {
         let left = l.until.timeIntervalSinceNow
         HStack(spacing: 6) {
             Chip(text: kind ?? "LEASED", icon: "key.fill", color: Color(hex: 0x3DDC97), filled: kind == nil).fixedSize()
