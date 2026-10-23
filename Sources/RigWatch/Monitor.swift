@@ -505,6 +505,9 @@ final class Monitor: ObservableObject {
         } else {
     msg += d.kind == .simulator ? "\n\nRuns `simctl shutdown`." : "\n\nAsks the emulator to quit through its console (adb emu kill). SIGTERM only if it does not answer in 15 s."
         }
+        if let l = d.lease {
+            msg += "\n\n⚠️ Leased to \(sessionLabel(l.session)) until \(Leases.time(l.until))\(l.purpose.isEmpty ? "" : " for \"\(l.purpose)\"") through RigWatch's device manager. Shutting it down ends the lease; that session gets an error the next time it uses the device."
+        }
         if let a = ask(for: d) {
             let who = sessionLabel(a.session)
             switch a.state {
@@ -516,7 +519,10 @@ final class Monitor: ObservableObject {
         let claim = d.claim
         pending = Pending(title: "Shut down \(d.name)?", message: msg, button: "Shut Down") {
             let r = claim.map { AgentDevice.release($0, deviceName: d.name) } ?? DeviceSampler.shutDown(d)
-            if !Self.looksFailed(r) { Asks.forget(device: d.id) }   // a stale answer must not carry over to its next boot
+            if !Self.looksFailed(r) {   // a stale answer or lease must not carry over to its next boot
+                Asks.forget(device: d.id)
+                Leases.edit { $0.removeAll { $0.covers(d) } }
+            }
             return r
         }
     }

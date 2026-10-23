@@ -684,6 +684,14 @@ struct DeviceCard: View {
                     }
                 }
                 VStack(alignment: .leading, spacing: 6) {
+                    if let l = d.lease {
+                        HStack(spacing: 6) {
+                            Chip(text: "LEASED", icon: "key.fill", color: Color(hex: 0x3DDC97)).fixedSize()
+                            SessionLink(id: l.session)
+                            Text("until \(Leases.time(l.until))\(l.purpose.isEmpty ? "" : " · " + l.purpose)")
+                                .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                        }.help("Lent to this agent session by RigWatch's device manager (MCP acquire_device). No other session is given it and the clean-up leaves it alone until the lease ends.")
+                    }
                     if let c = d.claim {
                         HStack(spacing: 6) {
                             Chip(text: "HELD BY AGENT-DEVICE", icon: "lock.fill", color: Color(hex: 0xFFD23F)).fixedSize()
@@ -693,7 +701,7 @@ struct DeviceCard: View {
                     }
                     if let l = d.launchedBy { sessionRow("Launched by", l) }
                     ForEach(d.recentUsers.sorted { $0.value > $1.value }.prefix(3), id: \.key) { u in sessionRow("Used by", u.key, when: u.value) }
-                    if d.launchedBy == nil && d.recentUsers.isEmpty && d.claim == nil { Text(d.kind == .simulator ? "No agent session linked" : "Started outside an agent session").hudLabel() }
+                    if d.launchedBy == nil && d.recentUsers.isEmpty && d.claim == nil && d.lease == nil { Text(d.kind == .simulator ? "No agent session linked" : "Started outside an agent session").hudLabel() }
                 }
                 if let a = d.lastAction {
                     VStack(alignment: .leading, spacing: 5) {

@@ -13,6 +13,7 @@ struct RulesView: View {
     @State private var log: [String] = []
     @State private var hook = false
     @State private var agent = false
+    @State private var mcp = false
     @State private var pins: Set<String> = []
 
     var body: some View {
@@ -58,7 +59,7 @@ struct RulesView: View {
         jobs = Rules.jobs().sorted { ($0.state == "running" ? 0 : 1, $0.since) < ($1.state == "running" ? 0 : 1, $1.since) }
         if !preview { report = Rules.lastReport() }
         log = Rules.logTail(40)
-        hook = Rules.hookInstalled(); agent = Rules.agentInstalled()
+        hook = Rules.hookInstalled(); agent = Rules.agentInstalled(); mcp = Rules.mcpInstalled()
         pins = Rules.pins()
     }
 
@@ -66,7 +67,7 @@ struct RulesView: View {
 
     var header: some View {
         let running = jobs.filter { $0.state == "running" }, waiting = jobs.filter { $0.state == "waiting" }
-        let on = hook && agent
+        let on = hook && agent && (mcp || Rules.claudeCLI == nil)   // Turn On also registers a missing device manager
         let pressure = Demo.on ? 1 : Rules.pressure()
         let allowed = Demo.on ? s.androidBuilds + s.iosBuilds : max(1, Rules.limit(s) / 2)
         return Panel(aspect: .rules) {
@@ -80,6 +81,8 @@ struct RulesView: View {
                     HStack(spacing: 6) {
                         Chip(text: hook ? "HOOK ON" : "HOOK OFF", icon: "link", color: hook ? Color(hex: 0x3DDC97) : Aspect.process.color, filled: hook)
                         Chip(text: agent ? "CLEAN-UP ON" : "CLEAN-UP OFF", icon: "clock.arrow.circlepath", color: agent ? Color(hex: 0x3DDC97) : Aspect.process.color, filled: agent)
+                        Chip(text: mcp ? "DEVICES ON" : "DEVICES OFF", icon: "key", color: mcp ? Color(hex: 0x3DDC97) : Aspect.process.color, filled: mcp)
+                            .help(mcp ? "Agents get emulators, simulators and phones from RigWatch (MCP server rigwatch: acquire_device, release_device)." : "The device manager is not registered with Claude Code. Turn the rules on to register it.")
                         if s.paused { Chip(text: "PAUSED", icon: "pause.fill", color: Color(hex: 0xFFD23F), filled: true) }
                     }.fixedSize()
                     HStack(spacing: 6) {

@@ -203,10 +203,10 @@ enum Rules {
         for b in boot where has(b.rx, cmd) {
             let (phys, virt) = devices(b.plat)
             if !phys.isEmpty {
-                return "A physical \(b.plat == "ios" ? "iPhone or iPad" : "Android device") is connected (\(phys.joined(separator: ", "))). Use it instead of booting a virtual one. If a virtual device is really required, put RIGWATCH_VIRTUAL=1 in front of the command."
+                return "A physical \(b.plat == "ios" ? "iPhone or iPad" : "Android device") is connected (\(phys.joined(separator: ", "))). Use it instead of booting a virtual one. If a virtual device is really required, put RIGWATCH_VIRTUAL=1 in front of the command, or ask RigWatch for one with the rigwatch MCP tool acquire_device."
             }
             if !virt.isEmpty {
-                return "\(virt.map { "\($0.name) (\($0.id))" }.joined(separator: ", ")) is already running on this machine. Reuse it instead of booting another; put RIGWATCH_VIRTUAL=1 in front of the command only if a second one is essential."
+                return "\(virt.map { "\($0.name) (\($0.id))" }.joined(separator: ", ")) is already running on this machine. Reuse it instead of booting another, or ask for a free device with the rigwatch MCP tool acquire_device, which leases it to you; put RIGWATCH_VIRTUAL=1 in front of the command only if a second one is essential."
             }
         }
         return nil
@@ -285,6 +285,14 @@ enum Rules {
         if out?["permissionDecision"] == nil, let ask = Asks.deliver(session: j["session_id"] as? String) {
             var o = out ?? ["hookEventName": "PreToolUse"]
             o["additionalContext"] = [o["additionalContext"] as? String, ask].compactMap { $0 }.joined(separator: "\n\n")
+            out = o
+        }
+        // Leases: a session naming its own leased device keeps the lease going; one naming another's is warned.
+        let tool = j["tool_name"] as? String ?? "", ti = j["tool_input"] as? [String: Any] ?? [:]
+        let text = tool == "Bash" ? ti["command"] as? String ?? "" : (try? JSONSerialization.data(withJSONObject: ti)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        if out?["permissionDecision"] == nil, !tool.hasPrefix("mcp__rigwatch__"), let note = Leases.noteCommand(text, session: j["session_id"] as? String) {
+            var o = out ?? ["hookEventName": "PreToolUse"]
+            o["additionalContext"] = [o["additionalContext"] as? String, note].compactMap { $0 }.joined(separator: "\n\n")
             out = o
         }
         if let out { emit(["hookSpecificOutput": out]) }
@@ -614,6 +622,7 @@ enum Rules {
             let idle = now.timeIntervalSince(last)
             let name = "\(d.name) (\(d.id))"
             if pinned.contains(d.id) || pinned.contains(d.name) { r.kept.append("\(name): pinned"); continue }
+            if let l = d.lease { r.kept.append("\(name): leased to session \(l.session) until \(Leases.time(l.until))"); continue }
             if let c = d.claim { r.kept.append("\(name): held by agent-device for session \(c.session)"); continue }
             // Only what an agent started: a device a person opened may be in use without any command naming it.
             guard d.launchedBy != nil || agentBooted(d) else { r.kept.append("\(name): not started by an agent session"); continue }
@@ -773,6 +782,28 @@ enum Rules {
     }
     static func agentInstalled() -> Bool { FileManager.default.fileExists(atPath: agentPlist) }
 
+    // MARK: MCP server registration
+
+    static let claudeConfig = (ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"].map { $0 + "/.claude.json" }) ?? Sh.home + "/.claude.json"
+    static let claudeCLI: String? = [Sh.home + "/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude", Sh.home + "/.claude/local/claude"]
+        .first { FileManager.default.isExecutableFile(atPath: $0) }
+    /// Whether Claude Code's user config lists RigWatch's MCP server.
+    static func mcpInstalled() -> Bool {
+        guard let d = FileManager.default.contents(atPath: claudeConfig), let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return false }
+        return (j["mcpServers"] as? [String: Any])?["rigwatch"] != nil
+    }
+    /// Registers `RigWatch mcp` for every Claude Code session of this user, through Claude Code's own CLI.
+    static func installMCP(exe: String) -> String {
+        guard let cli = claudeCLI else { return "Claude Code's command (claude) was not found, so the device manager is not registered. Run: claude mcp add --scope user rigwatch -- \(quote(exe)) mcp" }
+        _ = Sh.run(cli, ["mcp", "remove", "--scope", "user", "rigwatch"], timeout: 30)
+        let r = Sh.run(cli, ["mcp", "add", "--scope", "user", "rigwatch", "--", exe, "mcp"], timeout: 30)
+        return r.code == 0 ? "the device manager (MCP server rigwatch) is registered for new Claude Code sessions"
+            : "registering the device manager failed (claude mcp add: \((r.err.isEmpty ? r.out : r.err).trimmingCharacters(in: .whitespacesAndNewlines).prefix(200)))"
+    }
+    static func uninstallMCP() {
+        if let cli = claudeCLI { _ = Sh.run(cli, ["mcp", "remove", "--scope", "user", "rigwatch"], timeout: 30) }
+    }
+
     /// Edits the PreToolUse hooks in ~/.claude/settings.json, after copying the file aside. Nil, or what went wrong.
     static func editHooks(_ change: (inout [[String: Any]]) -> Void) -> String? {
         var root: [String: Any] = [:]
@@ -803,14 +834,15 @@ enum Rules {
         let b = Sh.run("/bin/launchctl", ["bootstrap", dom, agentPlist], timeout: 15)
         let agent = b.code == 0 ? "the clean-up runs every 10 minutes"
             : "the clean-up agent did not start (launchctl: \(b.err.trimmingCharacters(in: .whitespacesAndNewlines))); from Terminal run: launchctl bootstrap \(dom) \(agentPlist)"
-        return "Rules on: new tool calls in every Claude Code session go through RigWatch, and \(agent)."
+        return "Rules on: new tool calls in every Claude Code session go through RigWatch, \(agent), and \(installMCP(exe: exe))."
     }
 
     static func uninstall() -> String {
         let err = editHooks { $0.removeAll(where: isOurs) }
         _ = Sh.run("/bin/launchctl", ["bootout", "gui/\(getuid())/\(agentLabel)"], timeout: 15)
         try? FileManager.default.removeItem(atPath: agentPlist)
-        return err ?? "Rules off: the hook is removed from Claude Code's settings and the clean-up agent is stopped."
+        uninstallMCP()
+        return err ?? "Rules off: the hook and the device manager are removed from Claude Code's settings and the clean-up agent is stopped."
     }
 
     // MARK: worktree creation
@@ -839,6 +871,8 @@ enum Rules {
             let (phys, virt) = devices(plat, procs: procs)
             out.append("\(plat): physical \(phys.isEmpty ? "none" : phys.joined(separator: ", ")); virtual \(virt.isEmpty ? "none" : virt.map { "\($0.name) \($0.id) up \(Fmt.ago($0.started).replacingOccurrences(of: " ago", with: ""))" }.joined(separator: ", "))")
         }
+        let leases = Leases.live()
+        out.append("leases: " + (leases.isEmpty ? "none" : leases.map { "\($0.name) (\($0.device)) to session \($0.session) until \(Leases.time($0.until))\($0.purpose.isEmpty ? "" : " for \"\($0.purpose)\"")" }.joined(separator: "; ")))
         out.append("pinned: \(pins().isEmpty ? "none" : pins().sorted().joined(separator: ", "))")
         if let r = lastReport() { out.append("last clean-up \(Fmt.ago(r.at)): \(r.actions.count) action(s)\(r.applied ? "" : ", reported only")") }
         return out.joined(separator: "\n")
@@ -855,10 +889,11 @@ enum CLI {
     RigWatch pin|unpin ID               keep an emulator or simulator (serial, AVD name or UDID) from the clean-up
     RigWatch answer ID yes|no [REASON]  answer RigWatch's question whether a device you use can be shut down
     RigWatch status                     what is running, queued and booted
+    RigWatch mcp                        MCP server: agents acquire and release emulators, simulators and phones
     RigWatch version                    the version of this RigWatch
-    RigWatch install|uninstall          turn the rules on or off (Claude Code hook + clean-up agent)
+    RigWatch install|uninstall          turn the rules on or off (Claude Code hook, MCP device manager, clean-up agent)
     """
-    static let commands: Set = ["run", "hook", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version"]
+    static let commands: Set = ["run", "hook", "mcp", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version"]
 
     static func main(_ args: [String]) -> Int32? {
         guard let c = args.first, commands.contains(c) else { return nil }
@@ -866,6 +901,7 @@ enum CLI {
         switch c {
         case "run": return Rules.run(a)
         case "hook": Rules.hook()   // nothing printed = the tool call goes ahead unchanged
+        case "mcp": return MCPServer.main()
         case "reap": let r = Rules.reap(apply: a.contains("--apply")); Rules.saveReport(r); print(r.text)
         case "wt": return Rules.newWorktree(a)
         case "pin", "unpin":

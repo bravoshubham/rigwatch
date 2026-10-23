@@ -15,6 +15,7 @@ struct Device: Identifiable {
     var started: Date?
     var launchedBy: String?        // session id from the emulator's environment
     var claim: AgentDevice.Claim?  // agent-device holds it for an agent session (it boots it again if shut down)
+    var lease: Lease?              // lent to an agent session through RigWatch's MCP server
     var recentUsers: [String: Date] = [:]
     var lastAction: (session: String, command: String, at: Date)?
     var foreground = ""            // top activity / running apps
@@ -64,7 +65,7 @@ final class DeviceSampler {
                 if q == nil {
                     // No -port flag: ask the emulator console for its AVD name, once per process.
                     if avdBySerial[serial] == nil || avdBySerial[serial]!.avd.isEmpty {
-                        let n = Sh.run(Sh.adb, ["-s", serial, "emu", "avd", "name"], timeout: 10).out.split(separator: "\n").first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        let n = Self.avdName(serial) ?? ""
                         avdBySerial[serial] = (nil, n)
                     }
                     let avd = avdBySerial[serial]!.avd
@@ -119,6 +120,8 @@ final class DeviceSampler {
         for i in out.indices { if let x = details[out[i].id] { out[i].foreground = out[i].foreground.isEmpty ? x.fg : out[i].foreground; out[i].screen = x.screen; out[i].guestLoad = x.load } }
         let claims = AgentDevice.claims()
         for i in out.indices { out[i].claim = claims[out[i].id] }
+        let leases = Leases.live()
+        for i in out.indices { out[i].lease = leases.first { $0.covers(out[i]) } }
         return out
     }
 
@@ -157,6 +160,13 @@ final class DeviceSampler {
         }
         simNameCache = (Date(), map)
         return map
+    }
+
+    /// The AVD an emulator runs, from its console. The reply ends lines with \r\n, which Swift counts as one
+    /// Character, so it is split on any newline rather than on "\n".
+    static func avdName(_ serial: String) -> String? {
+        Sh.run(Sh.adb, ["-s", serial, "emu", "avd", "name"], timeout: 10).out.split(whereSeparator: \.isNewline).first
+            .map { $0.trimmingCharacters(in: .whitespaces) }.flatMap { $0.isEmpty || $0 == "OK" ? nil : $0 }
     }
 
     static func arg(_ p: Proc, _ flag: String) -> String? {
@@ -203,7 +213,8 @@ final class DeviceSampler {
         }
         if let s = d.serial { _ = Sh.run(Sh.adb, ["-s", s, "emu", "kill"], timeout: 10) }
         guard let pid = d.pid else { return "Sent kill to \(d.name)." }
-        for _ in 0..<30 { if kill(pid, 0) != 0 { return "Shut down \(d.name)." }; usleep(500_000) }
+        // Up to a minute: an emulator saves its quick-boot snapshot as it quits, and SIGTERM would cut that short.
+        for _ in 0..<120 { if kill(pid, 0) != 0 { return "Shut down \(d.name)." }; usleep(500_000) }
         kill(pid, SIGTERM)
         for _ in 0..<20 { if kill(pid, 0) != 0 { return "\(d.name) did not answer the console; stopped it with SIGTERM." }; usleep(500_000) }
         return "\(d.name) is still running after SIGTERM (pid \(pid)). Use Force Quit in Processes if you are sure."

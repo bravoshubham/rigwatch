@@ -81,7 +81,8 @@ and the Mac is at load 300 with swap full. The Rules page fixes that, for every 
 at once, desktop app and terminal alike:
 
 - **Queue heavy builds.** Gradle, `xcodebuild` and npm, yarn or pod installs wait for a free slot
-  (2 at once by default, fewer under memory pressure), first come first served, at a priority that
+  (Android and iOS have their own: 2 and 1 at once by default, fewer under memory pressure), first
+  come first served within each, at a priority that
   keeps the rest of the Mac responsive, with a thread cap each. A session whose build has to wait gets
   it moved to the background and keeps working.
 - **Physical devices first.** Booting an emulator or simulator is refused while a phone of that kind
@@ -104,9 +105,18 @@ at once, desktop app and terminal alike:
   makes no tool calls, so it cannot answer until it does something; the card says so. Questions lapse
   after 30 minutes.
 - **Never clean up** lists folders the clean-up leaves alone completely (e.g. `~/work, ~/clients`).
+- **Hand out devices.** RigWatch is also an MCP server (`RigWatch mcp`) that agents ask for a device:
+  `acquire_device` gives a session a free connected phone or a free running emulator or simulator, and
+  boots one only when none is free. The device is leased to that session: no other session is given
+  it, the hook warns a session that names a device leased to another, and the clean-up leaves it
+  alone. Commands naming the device keep the lease going; it ends when the session releases it
+  (`release_device` shuts down what RigWatch booted), when it runs out (30 minutes by default), or as
+  soon as the session's Claude Code process exits. `list_devices`, `renew_device` and `build_queue`
+  round it off. Leased devices show a **Leased** chip on their card.
 
 **Turn on** adds a `PreToolUse` hook to `~/.claude/settings.json` (the old file is kept as
-`settings.json.rigwatch-backup`) and a LaunchAgent that runs the clean-up every 10 minutes; for its
+`settings.json.rigwatch-backup`), registers the MCP server for every Claude Code session
+(`claude mcp add --scope user rigwatch`), and adds a LaunchAgent that runs the clean-up every 10 minutes; for its
 first hour the clean-up only reports. **Preview** shows what it would do, **Pause** stops everything.
 The same commands work from a terminal:
 
@@ -116,7 +126,8 @@ RigWatch reap [--apply]             the clean-up (reports only without --apply)
 RigWatch wt REPO BRANCH [BASE]      new worktree beside the repo, in .wt/, with node_modules cloned in
 RigWatch pin|unpin ID               keep an emulator or simulator from the clean-up
 RigWatch answer ID yes|no [REASON]  answer RigWatch's question whether a device can be shut down
-RigWatch status                     what is running, queued and booted
+RigWatch status                     what is running, queued, booted and leased
+RigWatch mcp                        the MCP server agents get devices from (Claude Code starts it)
 RigWatch install|uninstall          turn the rules on or off
 ```
 
