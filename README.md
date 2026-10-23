@@ -97,6 +97,12 @@ at once, desktop app and terminal alike:
   are left alone.
 - **Delete orphaned DerivedData** whose project is provably gone: its folder can be read and no longer
   holds it. Projects on external drives or in folders macOS guards are left alone.
+- **Ask the session before shutting a device down.** On an emulator or simulator card linked to a live
+  Claude Code session, **Ask session** leaves the question for that session; the hook hands it over
+  with the session's next Bash or MCP tool call, and the agent answers with `RigWatch answer`. The card
+  then shows "safe to close" or "keep" with its reason. Nothing is shut down for you. An idle session
+  makes no tool calls, so it cannot answer until it does something; the card says so. Questions lapse
+  after 30 minutes.
 - **Never clean up** lists folders the clean-up leaves alone completely (e.g. `~/work, ~/clients`).
 
 **Turn on** adds a `PreToolUse` hook to `~/.claude/settings.json` (the old file is kept as
@@ -109,6 +115,7 @@ RigWatch run [--kind K] -- CMD...   run CMD once a build slot is free
 RigWatch reap [--apply]             the clean-up (reports only without --apply)
 RigWatch wt REPO BRANCH [BASE]      new worktree beside the repo, in .wt/, with node_modules cloned in
 RigWatch pin|unpin ID               keep an emulator or simulator from the clean-up
+RigWatch answer ID yes|no [REASON]  answer RigWatch's question whether a device can be shut down
 RigWatch status                     what is running, queued and booted
 RigWatch install|uninstall          turn the rules on or off
 ```
