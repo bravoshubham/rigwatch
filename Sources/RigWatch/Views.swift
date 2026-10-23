@@ -714,17 +714,53 @@ struct DeviceCard: View {
                     Label("\(working.map(\.title).joined(separator: ", ")) is working and recently used this device", systemImage: "exclamationmark.triangle.fill")
                         .font(.system(size: 11, weight: .medium)).foregroundStyle(Color(hex: 0xFF8A3D))
                 }
+                if let a = m.ask(for: d) { askRow(a) }
                 HStack {
                     Button { m.takeScreenshot(d) } label: { Label(m.busy.contains("shot:\(d.id)") ? "Opening" : "Live view", systemImage: "play.rectangle") }
                         .buttonStyle(HUDButton(color: aspect.color))
                         .disabled((d.serial == nil && d.kind != .simulator) || d.state == "offline")
                     Spacer()
                     if d.kind != .phone {
-                        Button { m.confirmShutDown(d) } label: { Label("Shut down", systemImage: "power") }.buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E)))
+                        if let s = m.askTarget(d), m.ask(for: d).map(\.answered) ?? true {
+                            Button { m.askSession(d) } label: { Label("Ask session", systemImage: "questionmark.bubble") }
+                                .buttonStyle(HUDButton(color: Aspect.claude.color))
+                                .help("Asks \(s.title) whether \(d.name) can be shut down. It sees the question on its next Bash or MCP tool call and answers with `RigWatch answer`. An idle session cannot answer. Nothing is shut down for you.")
+                        }
+                        Button { m.confirmShutDown(d) } label: { Label("Shut down", systemImage: "power") }
+                            .buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E), filled: m.ask(for: d)?.state == .yes))
                     }
                 }
             }
         }
+    }
+
+    /// Where the question to the session stands. Waiting turns into "idle" after two minutes without a
+    /// tool call from it, because only a tool call can carry the question.
+    func askRow(_ a: Ask) -> some View {
+        let s = m.session(a.session), who = s?.title ?? String(a.session.prefix(8))
+        let idle = !(s?.isWorking ?? false) && Date().timeIntervalSince(a.askedAt) > 120
+        let waited = Fmt.ago(a.askedAt).replacingOccurrences(of: " ago", with: "")
+        let (chip, icon, color, text): (String, String, Color, String) = switch a.state {
+        case .yes: ("SAFE TO CLOSE", "checkmark.circle.fill", Color(hex: 0x3DDC97),
+                    "\(who) answered \(Fmt.ago(a.answeredAt))" + (a.reason.isEmpty ? "." : ": \(a.reason)"))
+        case .no: ("KEEP", "hand.raised.fill", Color(hex: 0xFF8A3D), "\(who) still needs it" + (a.reason.isEmpty ? " (no reason given)." : ": \(a.reason)"))
+        case .delivered: ("WAITING \(waited.uppercased())", "hourglass", Color(hex: 0xFFD23F),
+                          "\(who) saw the question \(Fmt.ago(a.deliveredAt)) and has not answered yet.")
+        case .pending where s?.live != true: ("NO ANSWER", "xmark.octagon", Aspect.process.color,
+                                              "\(who) is no longer running, so it cannot see or answer the question. Decide yourself.")
+        case .pending where idle: ("WAITING \(waited.uppercased())", "moon.zzz", Aspect.process.color,
+                                   "\(who) is idle, so it has not seen the question: it only arrives with the session's next Bash or MCP tool call. Decide yourself, or wait.")
+        case .pending: ("ASKED", "questionmark.bubble", Aspect.claude.color, "Waiting for \(who)'s next Bash or MCP tool call to deliver the question.")
+        }
+        return HStack(alignment: .top, spacing: 8) {
+            Chip(text: chip, icon: icon, color: color).fixedSize()
+            Text(text).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
+            Button { m.forgetAsk(d) } label: { Image(systemName: "xmark") }.buttonStyle(.plain).foregroundStyle(.secondary)
+                .help("Forget this question. Unanswered questions lapse 30 min after asking; answers are kept for 30 min.")
+        }
+        .padding(9)
+        .background(Rectangle().fill(color.opacity(0.07)))
+        .overlay(alignment: .leading) { Rectangle().fill(color).frame(width: 2) }
     }
 
     func sessionRow(_ label: String, _ id: String, when: Date? = nil) -> some View {

@@ -51,6 +51,7 @@ final class Monitor: ObservableObject {
     @Published var selfMem: UInt64 = 0
     @Published var agentOwner: [Int32: String] = [:]   // pid -> session id, for agents other than Claude Code
     @Published var top: TopKind?                         // the Top CPU / Top memory sheet, when open
+    @Published var asks: [Ask] = []                      // open "is it safe to shut down?" questions (asks.json)
     /// The last 15 minutes, in memory only. Not @Published: a hidden-window sample would otherwise wake
     /// every view (the menu bar label too); views read it when the next visible sample redraws them.
     private(set) var history: [Moment] = []
@@ -191,6 +192,8 @@ final class Monitor: ObservableObject {
                 if var devs {
                     for i in devs.indices { devs[i].recentUsers = mentions[devs[i].id] ?? [:]; devs[i].lastAction = actions[devs[i].id] }
                     self.devices = devs
+                    let asks = Demo.on ? [] : Asks.load()
+                    if asks != self.asks { self.asks = asks }
                 }
                 self.selfCPU = own?.cpu ?? 0; self.selfMem = own?.mem ?? 0
                 self.record(s, ps, groups)
@@ -502,9 +505,42 @@ final class Monitor: ObservableObject {
         } else {
     msg += d.kind == .simulator ? "\n\nRuns `simctl shutdown`." : "\n\nAsks the emulator to quit through its console (adb emu kill). SIGTERM only if it does not answer in 15 s."
         }
+        if let a = ask(for: d) {
+            let who = sessionLabel(a.session)
+            switch a.state {
+            case .yes: msg += "\n\n\(who) answered that it is safe to shut down (\(Fmt.ago(a.answeredAt)))" + (a.reason.isEmpty ? "." : ": \(a.reason)")
+            case .no: msg += "\n\n⚠️ \(who) asked to keep it (\(Fmt.ago(a.answeredAt)))" + (a.reason.isEmpty ? "." : ": \(a.reason)")
+            case .pending, .delivered: msg += "\n\n\(who) has not answered whether it is safe yet (asked \(Fmt.ago(a.askedAt)))."
+            }
+        }
         let claim = d.claim
-        pending = Pending(title: "Shut down \(d.name)?", message: msg, button: "Shut Down") { claim.map { AgentDevice.release($0, deviceName: d.name) } ?? DeviceSampler.shutDown(d) }
+        pending = Pending(title: "Shut down \(d.name)?", message: msg, button: "Shut Down") {
+            let r = claim.map { AgentDevice.release($0, deviceName: d.name) } ?? DeviceSampler.shutDown(d)
+            if !Self.looksFailed(r) { Asks.forget(device: d.id) }   // a stale answer must not carry over to its next boot
+            return r
+        }
     }
+
+    // MARK: ask the session
+
+    /// The live Claude Code session to ask about a device: the one that last ran a command on it, then the
+    /// most recent user, then the one that launched it. Only Claude Code sessions: the question travels
+    /// through its PreToolUse hook.
+    func askTarget(_ d: Device) -> Session? {
+        let ids = [d.lastAction?.session] + d.recentUsers.sorted { $0.value > $1.value }.map { Optional($0.key) } + [d.launchedBy]
+        return ids.compactMap { session($0) }.first { $0.live && $0.agent == .claude && !$0.id.hasPrefix("pid:") }
+    }
+    func ask(for d: Device) -> Ask? { asks.first { $0.device == d.id } }
+
+    func askSession(_ d: Device) {
+        guard let s = askTarget(d) else { refuse("Ask session", "No live Claude Code session is linked to \(d.name)."); return }
+        if Demo.on { outcome = ActionOutcome(title: "Ask session", text: "Demo mode: nothing was changed.", failed: false); return }
+        guard Rules.hookInstalled() else { refuse("Ask session", "The RigWatch hook is not installed (Rules page), so the session would never see the question."); return }
+        Asks.ask(device: d.id, name: d.name, session: s.id)
+        asks = Asks.load()
+        outcome = ActionOutcome(title: "Ask \(s.title)", text: "Asked whether \(d.name) can be shut down. The session sees the question on its next Bash or MCP tool call; if it is idle it will not answer until it does something.", failed: false)
+    }
+    func forgetAsk(_ d: Device) { Asks.forget(device: d.id); asks = Asks.load() }
 
     func takeScreenshot(_ d: Device) {
         if Demo.on { toast = "Demo mode: no real device to capture."; return }

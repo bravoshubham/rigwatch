@@ -274,18 +274,30 @@ enum Rules {
     // MARK: hook
 
     /// Claude Code PreToolUse hook: reads the tool call on stdin, prints a rewrite or a refusal, or nothing.
+    /// A question the user asked this session from a device card rides along as context, even while the rules are paused.
     static func hook() {
         guard let data = try? FileHandle.standardInput.readToEnd(), let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
         let s = RuleSettings.load()
-        guard !s.paused else { return }
+        var out = s.paused ? nil : decide(j, s)
+        // Not on a refused call: the question waits for one that goes ahead, so it is not lost beside the refusal.
+        if out?["permissionDecision"] == nil, let ask = Asks.deliver(session: j["session_id"] as? String) {
+            var o = out ?? ["hookEventName": "PreToolUse"]
+            o["additionalContext"] = [o["additionalContext"] as? String, ask].compactMap { $0 }.joined(separator: "\n\n")
+            out = o
+        }
+        if let out { emit(["hookSpecificOutput": out]) }
+    }
+
+    /// What the rules do to one tool call: the hookSpecificOutput to print, or nil to leave it alone.
+    static func decide(_ j: [String: Any], _ s: RuleSettings) -> [String: Any]? {
         let tool = j["tool_name"] as? String ?? ""
         var ti = j["tool_input"] as? [String: Any] ?? [:]
         var out: [String: Any] = ["hookEventName": "PreToolUse"]
         switch tool {
         case "Bash":
             switch wrap(ti["command"] as? String ?? "", s) {
-            case .leave: return
-            case .deny(let why): return deny(why)
+            case .leave: return nil
+            case .deny(let why): return denial(why)
             case .wrap(let cmd, let kind):
                 ti["command"] = cmd
                 if ti["run_in_background"] as? Bool != true, wouldWait(kind, s) {
@@ -296,8 +308,8 @@ enum Rules {
         case _ where tool.hasSuffix("__ctx_execute") && ti["language"] as? String == "shell":
             // Tools that run shell code in a sandbox of their own still take a slot.
             switch wrap(ti["code"] as? String ?? "", s) {
-            case .leave: return
-            case .deny(let why): return deny(why)
+            case .leave: return nil
+            case .deny(let why): return denial(why)
             case .wrap(let cmd, _): ti["code"] = cmd
             }
         case _ where tool.hasSuffix("__ctx_batch_execute"):
@@ -305,11 +317,11 @@ enum Rules {
             for i in cmds.indices {
                 switch wrap(cmds[i]["command"] as? String ?? "", s) {
                 case .leave: continue
-                case .deny(let why): return deny(why)
+                case .deny(let why): return denial(why)
                 case .wrap(let cmd, _): cmds[i]["command"] = cmd; changed = true
                 }
             }
-            guard changed else { return }
+            guard changed else { return nil }
             ti["commands"] = cmds
         case _ where tool.hasPrefix("mcp__"):
             // Device tools drive emulators and simulators without a shell: note their use so the clean-up leaves the device alone.
@@ -317,15 +329,15 @@ enum Rules {
             let ids = matches(deviceIds, text)
             ids.forEach(touch)
             if ids.isEmpty && has(deviceTool, tool) { touch("any-device") }
-            return
-        default: return
+            return nil
+        default: return nil
         }
         out["updatedInput"] = ti
-        emit(["hookSpecificOutput": out])
+        return out
     }
 
-    static func deny(_ why: String) {
-        emit(["hookSpecificOutput": ["hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "RigWatch: " + why]])
+    static func denial(_ why: String) -> [String: Any] {
+        ["hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "RigWatch: " + why]
     }
     static func emit(_ o: [String: Any]) {
         if let d = try? JSONSerialization.data(withJSONObject: o, options: [.withoutEscapingSlashes]) { FileHandle.standardOutput.write(d) }
@@ -825,11 +837,12 @@ enum CLI {
     RigWatch reap [--apply]             clean up idle devices, worktrees and DerivedData (reports only without --apply)
     RigWatch wt REPO BRANCH [BASE]      new worktree beside the repo, in .wt/, with node_modules cloned in
     RigWatch pin|unpin ID               keep an emulator or simulator (serial, AVD name or UDID) from the clean-up
+    RigWatch answer ID yes|no [REASON]  answer RigWatch's question whether a device you use can be shut down
     RigWatch status                     what is running, queued and booted
     RigWatch version                    the version of this RigWatch
     RigWatch install|uninstall          turn the rules on or off (Claude Code hook + clean-up agent)
     """
-    static let commands: Set = ["run", "hook", "reap", "status", "wt", "pin", "unpin", "install", "uninstall", "help", "version", "--version"]
+    static let commands: Set = ["run", "hook", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version"]
 
     static func main(_ args: [String]) -> Int32? {
         guard let c = args.first, commands.contains(c) else { return nil }
@@ -842,6 +855,7 @@ enum CLI {
         case "pin", "unpin":
             guard let id = a.first else { Rules.say("usage: RigWatch \(c) ID"); return 2 }
             Rules.setPin(id, c == "pin"); print("pinned: \(Rules.pins().sorted().joined(separator: ", ").ifEmpty("none"))")
+        case "answer": return Asks.answer(a)
         case "status": print(Rules.status())
         case "version", "--version": print("RigWatch \(AppCopy.ownVersion)")
         case "install": print(Rules.install(exe: Rules.installExe))
