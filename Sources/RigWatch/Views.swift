@@ -76,8 +76,8 @@ struct RootView: View {
                 Button("Cancel", role: .cancel) {}
             }
         } message: { p in Text(p.message) }
-        .sheet(isPresented: Binding(get: { m.screenshot != nil }, set: { if !$0 { m.screenshot = nil } })) {
-            if let s = m.screenshot { LiveView(device: s.device, first: s.image) }
+        .sheet(isPresented: Binding(get: { m.liveView != nil }, set: { if !$0 { m.liveView = nil } })) {
+            if let d = m.liveView { LiveView(device: d) }
         }
         .overlay {
             // Top CPU / Top memory: an overlay, not a sheet, so the confirmations behind its actions can show.
@@ -715,7 +715,7 @@ struct DeviceCard: View {
                         .font(.system(size: 11, weight: .medium)).foregroundStyle(Color(hex: 0xFF8A3D))
                 }
                 HStack {
-                    Button { m.takeScreenshot(d) } label: { Label(m.busy.contains("shot:\(d.id)") ? "Opening" : "Live view", systemImage: "play.rectangle") }
+                    Button { m.openLiveView(d) } label: { Label("Live view", systemImage: "play.rectangle") }
                         .buttonStyle(HUDButton(color: aspect.color))
                         .disabled((d.serial == nil && d.kind != .simulator) || d.state == "offline")
                     Spacer()
@@ -1535,19 +1535,38 @@ struct LiveView: View {
     @ObservedObject private var m = Monitor.shared
     @Environment(\.colorScheme) private var scheme
     let device: Device
-    let first: NSImage
     @State private var image: NSImage?
+    @State private var failed = false
     @State private var live = true
-    @State private var at = Date()
+    @State private var background = false
+    @State private var at: Date?
     var body: some View {
         let d = m.devices.first { $0.id == device.id } ?? device
         let aspect: Aspect = d.kind == .simulator ? .ios : .android
         HStack(alignment: .top, spacing: 20) {
-            Image(nsImage: image ?? first).resizable().scaledToFit().frame(maxWidth: 420, maxHeight: 780)
-                .clipShape(RoundedRectangle(cornerRadius: 24))
-                .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(aspect.color.opacity(0.6), lineWidth: 1))
+            if let image {
+                Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 420, maxHeight: 780)
+                    .clipShape(RoundedRectangle(cornerRadius: 24))
+                    .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(aspect.color.opacity(0.6), lineWidth: 1))
+            } else {
+                // Until the first frame: a quiet device shape that says what is happening, not an empty frame.
+                let waiting = !live || background
+                VStack(spacing: 14) {
+                    Image(systemName: d.kind == .simulator ? "iphone" : "candybarphone").font(.system(size: 44, weight: .ultraLight))
+                        .foregroundStyle(aspect.color.opacity(0.45))
+                    HStack(spacing: 7) {
+                        if !waiting && !failed { ProgressView().controlSize(.mini) }
+                        Text(failed ? "Could not capture the screen" : !live ? "Paused" : background ? "Waiting" : "Capturing the screen").hudLabel(failed ? Color(hex: 0xFF8A3D) : nil)
+                    }
+                    Text(failed ? "Trying again every 3 s." : !live ? "Resume to see the screen." : background ? "Frames are taken only while RigWatch is the app in front." : "The first frame can take a few seconds on a busy Mac.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(width: 200)
+                }
+                .frame(width: 300, height: 650)
+                .background(RoundedRectangle(cornerRadius: 40).fill(aspect.color.opacity(0.05)))
+                .overlay(RoundedRectangle(cornerRadius: 40).strokeBorder(HUD(scheme: scheme).line, lineWidth: 1))
+            }
             VStack(alignment: .leading, spacing: 12) {
-                HStack { Dot(color: live ? Color(hex: 0x3DDC97) : Aspect.process.color); Text(live ? "Live · every 3 s" : "Paused").hudLabel() }
+                HStack { Dot(color: live && !background ? Color(hex: 0x3DDC97) : Aspect.process.color); Text(!live ? "Paused" : background ? "Paused while RigWatch is in the background" : "Live · every 3 s").hudLabel() }
                 Text(d.name).font(.system(size: 22, weight: .semibold)).lineLimit(1)
                 HStack(spacing: 20) {
                     Readout(label: "CPU", value: Fmt.cpu(d.cpu), color: Heat.cpu(d.cpu).readable(scheme), size: 20)
@@ -1576,21 +1595,28 @@ struct LiveView: View {
                 Spacer()
                 HStack {
                     Button(live ? "Pause" : "Resume") { live.toggle() }.buttonStyle(HUDButton(color: aspect.color))
-                    Text("Updated \(at.formatted(date: .omitted, time: .standard))").hudLabel().lineLimit(1)
+                    Text(at.map { "Updated \($0.formatted(date: .omitted, time: .standard))" } ?? "No frame yet").hudLabel().lineLimit(1)
                     Spacer()
-                    Button("Close") { m.screenshot = nil }.buttonStyle(HUDButton(color: Aspect.process.color)).keyboardShortcut(.defaultAction)
+                    Button("Close") { m.liveView = nil }.buttonStyle(HUDButton(color: Aspect.process.color)).keyboardShortcut(.defaultAction)
                 }
             }.frame(width: 340)
         }
         .padding(22)
         .background(GridBackground())
+        // A frame every 3 s, the first at once. Each capture makes the device render and encode its screen,
+        // so nothing is captured while RigWatch is not the app in front.
         .task(id: live) {
+            var due = Date.distantPast
             while live && !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(3))
-                guard live, !Task.isCancelled else { break }
-                let dev = device
-                let data = Demo.on ? nil : await Task.detached(priority: .utility) { DeviceSampler.screenshot(dev) }.value
-                if let data, let img = NSImage(data: data) { image = img; at = Date() }
+                background = !NSApp.isActive
+                if !background && Date() >= due {
+                    let dev = device
+                    let data = await Task.detached(priority: .utility) { DeviceSampler.screenshot(dev) }.value
+                    guard live, !Task.isCancelled else { break }
+                    if let data, let img = NSImage(data: data) { image = img; failed = false; at = Date() } else if image == nil { failed = true }
+                    due = Date().addingTimeInterval(3)
+                }
+                try? await Task.sleep(for: .milliseconds(500))
             }
         }
     }

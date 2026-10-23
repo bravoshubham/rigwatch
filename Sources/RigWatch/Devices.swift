@@ -175,10 +175,18 @@ final class DeviceSampler {
 
     // MARK: actions
 
+    /// simctl's own path, found once, so each capture skips the xcrun lookup.
+    static let simctl: String? = {
+        let p = Sh.run("/usr/bin/xcrun", ["-f", "simctl"], timeout: 10).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        return FileManager.default.isExecutableFile(atPath: p) ? p : nil
+    }()
+
     static func screenshot(_ d: Device) -> Data? {
         if d.kind == .simulator {
-            let f = NSTemporaryDirectory() + "rigwatch-\(d.id).png"
-            _ = Sh.run("/usr/bin/xcrun", ["simctl", "io", d.id, "screenshot", "--type=png", f], timeout: 15)
+            // JPEG is about a sixth the size of the PNG, so less to write, read and decode every 3 s.
+            let f = NSTemporaryDirectory() + "rigwatch-\(d.id).jpg"
+            let (exe, pre) = simctl.map { ($0, [String]()) } ?? ("/usr/bin/xcrun", ["simctl"])
+            _ = Sh.run(exe, pre + ["io", d.id, "screenshot", "--type=jpeg", f], timeout: 15)
             defer { try? FileManager.default.removeItem(atPath: f) }
             return try? Data(contentsOf: URL(fileURLWithPath: f))
         }

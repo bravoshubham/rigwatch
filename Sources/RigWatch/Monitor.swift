@@ -45,7 +45,7 @@ final class Monitor: ObservableObject {
     @Published var folders: [Folder] = Demo.on ? Demo.folders() : Monitor.defaultFolders()
     @Published var pending: Pending?
     @Published var toast: String?
-    @Published var screenshot: (device: Device, image: NSImage)?
+    @Published var liveView: Device?   // the device whose live view sheet is open
     @Published var busy: Set<String> = []
     @Published var selfCPU = 0.0
     @Published var selfMem: UInt64 = 0
@@ -506,16 +506,10 @@ final class Monitor: ObservableObject {
         pending = Pending(title: "Shut down \(d.name)?", message: msg, button: "Shut Down") { claim.map { AgentDevice.release($0, deviceName: d.name) } ?? DeviceSampler.shutDown(d) }
     }
 
-    func takeScreenshot(_ d: Device) {
+    /// Opens the live view at once; the sheet captures its own frames.
+    func openLiveView(_ d: Device) {
         if Demo.on { toast = "Demo mode: no real device to capture."; return }
-        busy.insert("shot:\(d.id)")
-        q.async {
-            let data = DeviceSampler.screenshot(d)
-            DispatchQueue.main.async {
-                self.busy.remove("shot:\(d.id)")
-                if let data, let img = NSImage(data: data) { self.screenshot = (d, img) } else { self.toast = "Could not capture \(d.name)." }
-            }
-        }
+        liveView = d
     }
 
     /// Opens a Claude desktop session in the app; otherwise copies the tool's resume command, or
