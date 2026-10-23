@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import IOKit
 
 struct Proc: Identifiable, Hashable {
     let pid: Int32
@@ -11,6 +12,7 @@ struct Proc: Identifiable, Hashable {
     var mem: UInt64          // physical footprint (own processes) or RSS (others)
     var diskRead: Double     // bytes/s, own processes only
     var diskWrite: Double
+    var gpu: Double = 0      // % of the GPU's time, from the driver's per-process counters
     var group: String
     var session: String?     // CLAUDE_CODE_SESSION_ID inherited by this process, if any
     var hostSession: String? // CLAUDE_CODE_HOST_SESSION_ID (desktop app's local_… id), if any
@@ -28,6 +30,7 @@ final class ProcSampler {
     private var prev: [Int32: Prev] = [:]
     private var meta: [Int32: Meta] = [:]
     private var prevWall: UInt64 = 0
+    private var prevGPU: [Int32: UInt64] = [:]
     private let tb: Double = { var i = mach_timebase_info(); mach_timebase_info(&i); return Double(i.numer) / Double(i.denom) }()
     private lazy var argmax: Int = { var m: Int32 = 0; var s = MemoryLayout<Int32>.size; sysctlbyname("kern.argmax", &m, &s, nil, 0); return Int(m) }()
     private lazy var buf = [UInt8](repeating: 0, count: argmax)
@@ -70,8 +73,41 @@ final class ProcSampler {
             p.group = Self.group(p)
             out.append(p)
         }
+        let gpuNow = Self.gpuTimes()
+        if dt > 0 {
+            for i in out.indices {
+                guard let now = gpuNow[out[i].pid], let was = prevGPU[out[i].pid], now >= was else { continue }
+                out[i].gpu = min(100, Double(now - was) / 1e9 / dt * 100)
+            }
+        }
+        prevGPU = gpuNow
         prev = prev.filter { seen.contains($0.key) }
         meta = meta.filter { seen.contains($0.key) }
+        return out
+    }
+
+    /// GPU time used so far (ns) by each process, summed over its GPU clients. Every process that draws with
+    /// the GPU has a user client under the accelerator, named "pid N, name", with an AppUsage list.
+    /// Readable without root, for every process.
+    static func gpuTimes() -> [Int32: UInt64] {
+        var out: [Int32: UInt64] = [:], it: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOAccelerator"), &it) == KERN_SUCCESS else { return out }
+        defer { IOObjectRelease(it) }
+        while case let acc = IOIteratorNext(it), acc != 0 {
+            var kids: io_iterator_t = 0
+            if IORegistryEntryGetChildIterator(acc, kIOServicePlane, &kids) == KERN_SUCCESS {
+                while case let c = IOIteratorNext(kids), c != 0 {
+                    if let who = IORegistryEntryCreateCFProperty(c, "IOUserClientCreator" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String,
+                       who.hasPrefix("pid "), let pid = Int32(who.dropFirst(4).prefix { $0.isNumber }),
+                       let use = IORegistryEntryCreateCFProperty(c, "AppUsage" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? [[String: Any]] {
+                        out[pid, default: 0] += use.reduce(0) { $0 + ((($1["accumulatedGPUTime"] as? NSNumber)?.uint64Value) ?? 0) }
+                    }
+                    IOObjectRelease(c)
+                }
+                IOObjectRelease(kids)
+            }
+            IOObjectRelease(acc)
+        }
         return out
     }
 

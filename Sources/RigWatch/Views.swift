@@ -260,6 +260,7 @@ struct OverviewView: View {
                     }
                     Gauge(aspect: .gpu, label: "Graphics", value: Double(s.gpu) / 100, big: "\(s.gpu)", unit: "%", color: Aspect.gpu.color) {
                         Chip(text: "VRAM \(Fmt.bytes(s.gpuMem))", color: Aspect.gpu.color)
+                        if let top = m.gpuUsers.first, top.gpu >= 1 { Chip(text: "\(top.name.uppercased()) \(Int(top.gpu.rounded()))%", color: Aspect.gpu.color).help("Uses the most GPU time right now") }
                     }
                     ForEach(s.volumes) { v in
                         let r = Double(v.used) / Double(max(v.total, 1))
@@ -297,6 +298,9 @@ struct OverviewView: View {
                     RankPanel(title: "CPU consumers · % of whole machine", aspect: .cpu, rows: m.groups.sorted { $0.cpu > $1.cpu }.prefix(8).map { ($0.name, $0.cpu / max(1, m.groups.map(\.cpu).max() ?? 1), Fmt.cpu($0.cpu), $0.count) })
                     RankPanel(title: "Memory consumers", aspect: .memory, rows: m.groups.sorted { $0.mem > $1.mem }.prefix(8).map { ($0.name, Double($0.mem) / Double(max(1, m.groups.map(\.mem).max() ?? 1)), Fmt.bytes($0.mem), $0.count) })
                 }
+                let gpu = m.gpuUsers.filter { $0.gpu >= 0.5 }.prefix(8)
+                RankPanel(title: "GPU users · % of GPU time", aspect: .gpu, rows: gpu.map { ($0.name, $0.gpu / max(1, gpu.first?.gpu ?? 1), String(format: "%.1f%%", $0.gpu), $0.count) })
+                    .help("Time each process kept the GPU busy, from the graphics driver's own counters. WindowServer draws the screen, so it is always there; apps with animations or video keep the GPU busy even when idle.")
             }.padding(20)
         }
     }
@@ -928,6 +932,10 @@ struct ProcessesView: View {
                             Meter(value: min(1, p.cpu / 400), color: Heat.cpu(p.cpu), height: 3).frame(width: 34)
                         }
                     }.width(110)
+                    TableColumn("GPU", value: \.gpu) { p in
+                        Text(p.gpu >= 0.05 ? String(format: "%.1f%%", p.gpu) : "—").font(.system(size: 11, design: .monospaced)).lineLimit(1)
+                            .foregroundStyle(p.gpu >= 10 ? Aspect.gpu.color.readable(scheme) : p.gpu >= 0.05 ? .primary : .secondary)
+                    }.width(55)
                     TableColumn("Memory", value: \.mem) { p in Text(Fmt.bytes(p.mem)).font(.system(size: 11, design: .monospaced)).lineLimit(1).foregroundStyle(p.mem > 4_000_000_000 ? Aspect.memory.color.readable(scheme) : .primary) }.width(80)
                     TableColumn("Disk", value: \.diskSort) { p in Text(p.isOwn ? Fmt.rate(p.diskRead + p.diskWrite) : "—").font(.system(size: 10.5, design: .monospaced)).lineLimit(1).foregroundStyle(.secondary) }.width(75)
                     TableColumn("Group", value: \.group) { p in Chip(text: p.group, color: Aspect.forGroup(p.group).color) }.width(min: 90, ideal: 130)

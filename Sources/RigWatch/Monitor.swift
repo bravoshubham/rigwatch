@@ -314,6 +314,12 @@ final class Monitor: ObservableObject {
         return out.values.sorted { ($0.live ? 0 : 1, $0.transcriptAge ?? .infinity) < ($1.live ? 0 : 1, $1.transcriptAge ?? .infinity) }
     }
 
+    /// Processes using the GPU, summed by name (an app's helpers share one name), busiest first.
+    var gpuUsers: [(name: String, gpu: Double, count: Int)] {
+        var by: [String: (Double, Int)] = [:]
+        for p in procs where p.gpu > 0 { let x = by[p.name] ?? (0, 0); by[p.name] = (x.0 + p.gpu, x.1 + 1) }
+        return by.map { (name: $0.key, gpu: $0.value.0, count: $0.value.1) }.sorted { $0.gpu > $1.gpu }
+    }
     var emulatorCount: Int { procs.filter { $0.name.hasPrefix("qemu-system") }.count }
     var simulatorCount: Int { procs.filter { $0.name == "launchd_sim" }.count }
     var idleWorktrees: Int { worktrees.filter { !$0.isMain && ($0.lastActivity.map { Date().timeIntervalSince($0) > 86400 } ?? true) }.count }
