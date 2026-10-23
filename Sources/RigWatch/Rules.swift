@@ -823,7 +823,8 @@ enum Rules {
     }
 
     static func install(exe: String) -> String {
-        write(Data(), to: dir + "/installed")   // starts the first hour of reporting only
+        // Starts the first hour of reporting only. Not on a re-install: the hook was already routing sessions.
+        if !hookInstalled() || !FileManager.default.fileExists(atPath: dir + "/installed") { write(Data(), to: dir + "/installed") }
         let entry: [String: Any] = ["matcher": "Bash|mcp__.*", "hooks": [["type": "command", "command": quote(exe) + " hook", "timeout": 45]]]
         if let err = editHooks({ $0.removeAll(where: isOurs); $0.append(entry) }) { return err }
         let plist: [String: Any] = ["Label": agentLabel, "ProgramArguments": [exe, "reap", "--apply"], "StartInterval": 600, "RunAtLoad": true,
