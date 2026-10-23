@@ -162,6 +162,8 @@ struct Sidebar: View {
                     Chip(text: Fmt.cpu(m.selfCPU), icon: "cpu", color: Aspect.cpu.color)
                     Chip(text: Fmt.bytes(m.selfMem), icon: "memorychip", color: Aspect.memory.color)
                 }
+                Text("Version \(AppCopy.ownVersion)").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                    .textSelection(.enabled).help("The RigWatch version this window is running")
             }.padding(16)
         }
         .frame(width: 228)

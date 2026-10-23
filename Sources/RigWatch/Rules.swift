@@ -762,9 +762,10 @@ enum CLI {
     RigWatch wt REPO BRANCH [BASE]      new worktree beside the repo, in .wt/, with node_modules cloned in
     RigWatch pin|unpin ID               keep an emulator or simulator (serial, AVD name or UDID) from the clean-up
     RigWatch status                     what is running, queued and booted
+    RigWatch version                    the version of this RigWatch
     RigWatch install|uninstall          turn the rules on or off (Claude Code hook + clean-up agent)
     """
-    static let commands: Set = ["run", "hook", "reap", "status", "wt", "pin", "unpin", "install", "uninstall", "help"]
+    static let commands: Set = ["run", "hook", "reap", "status", "wt", "pin", "unpin", "install", "uninstall", "help", "version", "--version"]
 
     static func main(_ args: [String]) -> Int32? {
         guard let c = args.first, commands.contains(c) else { return nil }
@@ -778,6 +779,7 @@ enum CLI {
             guard let id = a.first else { Rules.say("usage: RigWatch \(c) ID"); return 2 }
             Rules.setPin(id, c == "pin"); print("pinned: \(Rules.pins().sorted().joined(separator: ", ").ifEmpty("none"))")
         case "status": print(Rules.status())
+        case "version", "--version": print("RigWatch \(AppCopy.ownVersion)")
         case "install": print(Rules.install(exe: Rules.installExe))
         case "uninstall": print(Rules.uninstall())
         default: print(usage)

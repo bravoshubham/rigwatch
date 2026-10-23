@@ -37,6 +37,11 @@ enum AppCopy {
 
     /// This process's own build, read once at launch (the bundle on disk may be replaced while it runs).
     static let ownBuild = Int(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "") ?? 0
+    /// The version this process is running, e.g. "1.5.1 (9)"; "dev" for a build run outside an app bundle.
+    static let ownVersion: String = {
+        guard let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String else { return "dev" }
+        return ownBuild > 0 ? "\(v) (\(ownBuild))" : v
+    }()
 
     /// The version `brew upgrade` has built, when it is newer than this running RigWatch. Only for the
     /// Homebrew build and its copy: a build run from anywhere else is left as it is.
