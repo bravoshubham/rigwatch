@@ -110,9 +110,27 @@ final class Monitor: ObservableObject {
     /// Seconds between samples while the window is on screen (Sidebar picker; 3, 5 or 10).
     var interval: Int { let v = UserDefaults.standard.integer(forKey: "interval"); return v == 0 ? 5 : v }
 
+    /// Set when `brew upgrade` has built a newer RigWatch than this one: its version, for the Restart banner.
+    @Published var updateReady: String?
+    private var lastUpdateCheck = Date.distantPast
+
+    /// Once a minute: a newer Homebrew build restarts RigWatch into it when no window is open (nothing is
+    /// lost), and otherwise offers a Restart. An app that is already running is only brought forward when
+    /// opened again, so without this it would keep showing the old version after an upgrade.
+    private func checkForUpdate() {
+        guard !Demo.on, !snapshotting, Date().timeIntervalSince(lastUpdateCheck) >= 60 else { return }
+        lastUpdateCheck = Date()
+        guard let v = AppCopy.newerVersion() else { return }
+        // Open counts even when covered by other windows: someone may come back to it, so ask instead.
+        let windowOpen = NSApp?.windows.contains { $0.isVisible && $0.canBecomeMain && !($0 is NSPanel) } ?? false
+        if !windowOpen && pending == nil { AppCopy.restartIntoNewest(background: true) }
+        if updateReady != v { updateReady = v }
+    }
+
     private func heartbeat(force: Bool = false) {
         tick += 1
         let visible = windowVisible
+        checkForUpdate()
         // Hidden: a cheap CPU/memory check every 5 s keeps the spike history going; processes are
         // listed only while the machine is busy, so the culprits of a spike are on record.
         if !visible, !force, !Demo.on, !running, Date().timeIntervalSince(lastProbe) >= 5, Date().timeIntervalSince(lastFull) < 55 { probe(); return }

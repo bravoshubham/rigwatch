@@ -34,6 +34,7 @@ struct MenuView: View {
         Text("GPU \(s.gpu)% · Swap \(Fmt.bytes(s.swapUsed))")
         if !m.devices.isEmpty { Text("\(m.devices.filter { $0.kind != .phone }.count) emulators/simulators running") }
         Divider()
+        if let v = m.updateReady { Button("Restart to use RigWatch \(v)") { AppCopy.restartIntoNewest() } }
         Button("Open RigWatch") { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
         Button("Quit RigWatch") { NSApp.terminate(nil) }
     }

@@ -42,6 +42,14 @@ struct RootView: View {
             Sidebar()
             Rectangle().fill(HUD(scheme: scheme).line).frame(width: 0.8)
             VStack(spacing: 0) {
+                if let v = m.updateReady {
+                    HStack(spacing: 10) {
+                        Image(systemName: "arrow.down.circle.fill").foregroundStyle(Aspect.worktree.color)
+                        Text("RigWatch \(v) is installed. Restart to use it.").font(.system(size: 12, weight: .semibold))
+                        Spacer()
+                        Button("Restart") { AppCopy.restartIntoNewest() }.buttonStyle(HUDButton(color: Aspect.worktree.color, filled: true))
+                    }.padding(.horizontal, 16).padding(.vertical, 8).background(Aspect.worktree.color.opacity(0.12))
+                }
                 TelemetryBar()
                 Rectangle().fill(HUD(scheme: scheme).line).frame(height: 0.8)
                 Group {

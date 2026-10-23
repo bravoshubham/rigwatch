@@ -138,9 +138,9 @@ brew update && brew upgrade rigwatch
 ```
 
 `brew update` makes Homebrew check for a new RigWatch right away; on its own, `brew upgrade` may skip
-the check if Homebrew looked recently. Then quit RigWatch (menu bar item → Quit RigWatch) and open it
-again, from Spotlight or with `rigwatch`: it notices the new build, updates the copy in
-`~/Applications` and restarts on the new version.
+the check if Homebrew looked recently. Nothing else to do: within a minute a running RigWatch
+notices the new build, updates the copy in `~/Applications` and restarts on it. If its window is
+open, it asks first with a Restart button (also in the menu bar menu), so nothing is cut short.
 
 ### From source
 
