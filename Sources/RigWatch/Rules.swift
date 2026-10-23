@@ -7,7 +7,8 @@ import Foundation
 struct RuleSettings: Codable, Equatable {
     var paused = false
     var queueBuilds = true
-    var parallelBuilds = 2
+    var androidBuilds = 2        // builds at once in each pool: an Android build never waits behind an iOS one
+    var iosBuilds = 1
     var buildThreads = max(2, ProcessInfo.processInfo.activeProcessorCount / 3)
     var physicalFirst = true
     var reapDevices = true
@@ -35,6 +36,7 @@ struct RuleSettings: Codable, Equatable {
               let enc = try? JSONEncoder().encode(def),
               var base = (try? JSONSerialization.jsonObject(with: enc)) as? [String: Any] else { return def }
         base.merge(saved) { _, new in new }
+        if saved["androidBuilds"] == nil, let n = saved["parallelBuilds"] { base["androidBuilds"] = n }   // before the split: one shared count
         return (try? JSONSerialization.data(withJSONObject: base)).flatMap { try? JSONDecoder().decode(RuleSettings.self, from: $0) } ?? def
     }
     func save() { Rules.write(try? JSONEncoder().encode(self), to: Rules.settingsFile) }
@@ -300,9 +302,9 @@ enum Rules {
             case .deny(let why): return denial(why)
             case .wrap(let cmd, let kind):
                 ti["command"] = cmd
-                if ti["run_in_background"] as? Bool != true, wouldWait(kind, s) {
+                if ti["run_in_background"] as? Bool != true, wouldWait(kind, cmd, s) {
                     ti["run_in_background"] = true
-                    out["additionalContext"] = "RigWatch: every build slot on this machine is busy, so this command was queued and moved to the background. You will be notified when it finishes; carry on with other work meanwhile."
+                    out["additionalContext"] = "RigWatch: every \(pool(kind: kind, cmd: cmd) == "ios" ? "iOS" : "Android") build slot on this machine is busy, so this command was queued and moved to the background. You will be notified when it finishes; carry on with other work meanwhile."
                 }
             }
         case _ where tool.hasSuffix("__ctx_execute") && ti["language"] as? String == "shell":
@@ -365,16 +367,30 @@ enum Rules {
         sysctlbyname("kern.memorystatus_vm_pressure_level", &l, &n, nil, 0)
         return l
     }
-    /// Slots allowed now: all of them, half under a memory pressure warning, none when critical
-    /// (a job still starts when nothing else is running).
-    static func limit(_ s: RuleSettings) -> Int {
-        let cap = max(1, s.parallelBuilds) * 2, p = pressure()
-        return p >= 4 ? 0 : p >= 2 ? cap / 2 : cap
+    /// The pool a build waits in: xcodebuild and pod installs are iOS; Gradle and npm or yarn installs are Android.
+    static let podInstall = rx(#"\bpod\s+(install|update)"#)
+    static func pool(kind: String, cmd: String) -> String {
+        kind == "xcodebuild" || (kind == "install" && has(podInstall, cmd)) ? "ios" : "android"
     }
-    static func load(_ jobs: [BuildJob]) -> Int { jobs.filter { $0.state == "running" }.reduce(0) { $0 + $1.weight } }
-    static func wouldWait(_ kind: String, _ s: RuleSettings) -> Bool {
-        let w = weights[kind] ?? 2, lim = limit(s)
-        return withJobs { j in j.contains { $0.state == "waiting" } || (load(j) > 0 && load(j) + w > lim) }
+    static func pool(_ j: BuildJob) -> String { pool(kind: j.kind, cmd: j.cmd) }
+    /// Slot units of one pool (a build takes 2).
+    static func cap(_ pool: String, _ s: RuleSettings) -> Int { max(1, pool == "ios" ? s.iosBuilds : s.androidBuilds) * 2 }
+    /// Slot units allowed now across both pools: all of them, half under a memory pressure warning, none when
+    /// critical (a job still starts when nothing else is running).
+    static func limit(_ s: RuleSettings) -> Int {
+        let all = cap("android", s) + cap("ios", s), p = pressure()
+        return p >= 4 ? 0 : p >= 2 ? all / 2 : all
+    }
+    static func load(_ jobs: [BuildJob], pool p: String? = nil) -> Int {
+        jobs.filter { $0.state == "running" && (p == nil || pool($0) == p) }.reduce(0) { $0 + $1.weight }
+    }
+    /// Whether a job of this pool and weight can start beside the running ones.
+    static func fits(_ p: String, _ w: Int, _ j: [BuildJob], _ s: RuleSettings) -> Bool {
+        load(j) == 0 || (load(j, pool: p) + w <= cap(p, s) && load(j) + w <= limit(s))
+    }
+    static func wouldWait(_ kind: String, _ cmd: String, _ s: RuleSettings) -> Bool {
+        let p = pool(kind: kind, cmd: cmd), w = weights[kind] ?? 2
+        return withJobs { j in j.contains { $0.state == "waiting" && pool($0) == p } || !fits(p, w, j, s) }
     }
 
     static var child: pid_t = 0
@@ -399,22 +415,22 @@ enum Rules {
             src.setEventHandler { if child > 0 { kill(child, sig) } else { release(); exit(128 + sig) } }
             src.resume(); sources.append(src)
         }
-        let queue = s.queueBuilds && !s.paused
+        let queue = s.queueBuilds && !s.paused, p = pool(me)
         let t0 = Date()
         var last = ""
         while true {
-            let lim = limit(s)
             let ahead: [BuildJob]? = withJobs { j in
                 guard let i = j.firstIndex(where: { $0.pid == me.pid }) else { j.append(me); return [] }
-                let head = j.filter { $0.state == "waiting" }.min { $0.since < $1.since }
-                if !queue || (head?.pid == me.pid && (load(j) == 0 || load(j) + me.weight <= lim)) {
+                // First come, first served within the pool; the other pool's line does not hold this one up.
+                let head = j.filter { $0.state == "waiting" && pool($0) == p }.min { $0.since < $1.since }
+                if !queue || (head?.pid == me.pid && fits(p, me.weight, j, s)) {
                     j[i].state = "running"; j[i].since = Date(); return nil
                 }
-                return j.filter { $0.state == "running" || ($0.state == "waiting" && $0.since < me.since) }
+                return j.filter { pool($0) == p && ($0.state == "running" || ($0.state == "waiting" && $0.since < me.since)) }
             }
             guard let ahead else { break }
             let msg = ahead.map { "\($0.kind) \($0.state) in \(($0.cwd as NSString).lastPathComponent)" }.joined(separator: "; ")
-            if msg != last { say("RigWatch: queued for a \(k) slot behind: \(msg.ifEmpty("memory pressure"))"); last = msg }
+            if msg != last { say("RigWatch: queued for an \(p == "ios" ? "iOS" : "Android") slot behind: \(msg.ifEmpty("memory pressure, which halves all builds"))"); last = msg }
             Thread.sleep(forTimeInterval: 2)
         }
         if Date().timeIntervalSince(t0) > 3 { say("RigWatch: slot granted after \(Int(Date().timeIntervalSince(t0))) s") }
@@ -815,7 +831,7 @@ enum Rules {
     static func status() -> String {
         let s = RuleSettings.load(), j = jobs()
         var out = ["rules \(s.paused ? "PAUSED" : "on") · hook \(hookInstalled() ? "installed" : "not installed") · clean-up agent \(agentInstalled() ? "installed" : "not installed")",
-                   "memory pressure \(pressure()) (1 normal, 2 warning, 4 critical) · \(load(j)) of \(limit(s)) slot units in use (a build takes 2)"]
+                   "memory pressure \(pressure()) (1 normal, 2 warning, 4 critical) · slot units in use (a build takes 2): Android \(load(j, pool: "android")) of \(cap("android", s)), iOS \(load(j, pool: "ios")) of \(cap("ios", s)), \(load(j)) of \(limit(s)) allowed in all"]
         out += j.map { "  \($0.state.padding(toLength: 8, withPad: " ", startingAt: 0)) \($0.kind.padding(toLength: 10, withPad: " ", startingAt: 0)) \(Int(Date().timeIntervalSince($0.since))) s  \(Views.tilde($0.cwd))  \($0.cmd.prefix(80))" }
         let procs = ProcSampler().sample()
         out += outsideQueue(procs).map { "  outside  \($0.kind.padding(toLength: 10, withPad: " ", startingAt: 0)) pid \($0.pid)  \($0.cwd.map(Views.tilde) ?? "?")  \($0.reason)" }
@@ -832,7 +848,7 @@ enum Rules {
 /// `RigWatch <command>`: the Rules command line. Anything else opens the app.
 enum CLI {
     static let usage = """
-    RigWatch run [--kind K] -- CMD...   run CMD once a machine-wide build slot is free
+    RigWatch run [--kind K] -- CMD...   run CMD once an Android or iOS build slot is free
     RigWatch hook                       Claude Code PreToolUse hook (tool call JSON on stdin)
     RigWatch reap [--apply]             clean up idle devices, worktrees and DerivedData (reports only without --apply)
     RigWatch wt REPO BRANCH [BASE]      new worktree beside the repo, in .wt/, with node_modules cloned in

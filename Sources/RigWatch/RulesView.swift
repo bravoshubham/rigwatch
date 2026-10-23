@@ -68,7 +68,7 @@ struct RulesView: View {
         let running = jobs.filter { $0.state == "running" }, waiting = jobs.filter { $0.state == "waiting" }
         let on = hook && agent
         let pressure = Demo.on ? 1 : Rules.pressure()
-        let allowed = Demo.on ? s.parallelBuilds : max(1, Rules.limit(s) / 2)
+        let allowed = Demo.on ? s.androidBuilds + s.iosBuilds : max(1, Rules.limit(s) / 2)
         return Panel(aspect: .rules) {
             HStack(alignment: .center, spacing: 26) {
                 Readout(label: "Building", value: "\(running.count)", unit: "of \(allowed) at once", color: Aspect.rules.color.readable(scheme), size: 30)
@@ -128,7 +128,7 @@ struct RulesView: View {
                             Text((j.cwd as NSString).lastPathComponent).font(.system(size: 12, weight: .medium)).lineLimit(1).help(Views.tilde(j.cwd))
                             Text(j.cmd).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(j.cmd)
                             Spacer(minLength: 8)
-                            Text("\(j.state == "running" ? "for" : "waited") \(Fmt.ago(j.since).replacingOccurrences(of: " ago", with: ""))").hudLabel().fixedSize()
+                            Text("\(j.state == "running" ? "started" : "queued") \(Fmt.ago(j.since))").hudLabel().fixedSize()
                             Text("pid \(j.pid)").font(.system(size: 9.5, design: .monospaced)).foregroundStyle(.tertiary).fixedSize()
                         }
                     }
@@ -164,8 +164,9 @@ struct RulesView: View {
         return Panel(aspect: .rules, padding: 14) {
             VStack(alignment: .leading, spacing: 14) {
                 rule("Queue heavy builds", $s.queueBuilds,
-                     "Gradle, xcodebuild and npm, yarn or pod installs from every agent session wait for a free slot, first come first served, and run at a priority that leaves the rest of the Mac responsive. Half the builds under a memory pressure warning, one at a time when it is critical.") {
-                    Stepper(value: $s.parallelBuilds, in: 1...6) { setting("\(s.parallelBuilds) at once") }
+                     "Gradle, xcodebuild and npm, yarn or pod installs from every agent session wait for a free slot, first come first served, and run at a priority that leaves the rest of the Mac responsive. Android (Gradle, npm, yarn) and iOS (xcodebuild, pod) have their own slots, so one platform's builds never wait behind the other's. Half of all builds under a memory pressure warning, one at a time when it is critical.") {
+                    Stepper(value: $s.androidBuilds, in: 1...6) { setting("Android \(s.androidBuilds) at once") }
+                    Stepper(value: $s.iosBuilds, in: 1...6) { setting("iOS \(s.iosBuilds) at once") }
                     Stepper(value: $s.buildThreads, in: 1...max(1, cores)) { setting("\(s.buildThreads) threads each") }
                 }
                 rule("Physical devices first", $s.physicalFirst,
