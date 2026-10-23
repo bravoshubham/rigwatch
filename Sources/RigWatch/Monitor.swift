@@ -2,12 +2,12 @@ import AppKit
 import Foundation
 
 enum Page: String, CaseIterable, Identifiable {
-    case overview = "Overview", devices = "Emulators & Simulators", sessions = "Agent Sessions", servers = "Dev Servers",
+    case overview = "Overview", devices = "Emulators & Simulators", deviceManager = "Device Manager", sessions = "Agent Sessions", servers = "Dev Servers",
          processes = "Processes", memory = "Memory", worktrees = "Worktrees", disk = "Disk", rules = "Rules"
     var id: String { rawValue }
     var icon: String {
         switch self {
-        case .overview: "gauge.with.dots.needle.33percent"; case .devices: "iphone.gen3"; case .sessions: "bubble.left.and.text.bubble.right"; case .servers: "server.rack"
+        case .overview: "gauge.with.dots.needle.33percent"; case .devices: "iphone.gen3"; case .deviceManager: "key"; case .sessions: "bubble.left.and.text.bubble.right"; case .servers: "server.rack"
         case .processes: "cpu"; case .memory: "memorychip"; case .worktrees: "arrow.triangle.branch"; case .disk: "internaldrive"; case .rules: "slider.horizontal.3"
         }
     }
@@ -52,6 +52,9 @@ final class Monitor: ObservableObject {
     @Published var agentOwner: [Int32: String] = [:]   // pid -> session id, for agents other than Claude Code
     @Published var top: TopKind?                         // the Top CPU / Top memory sheet, when open
     @Published var asks: [Ask] = []                      // open "is it safe to shut down?" questions (asks.json)
+    @Published var leases: [Lease] = []                  // devices lent to agent sessions (leases.json)
+    @Published var bootable: (avds: [String], sims: [DeviceManager.Sim])?   // what acquire_device could boot, for the Device Manager page
+    private var bootableAt = Date.distantPast
     /// The last 15 minutes, in memory only. Not @Published: a hidden-window sample would otherwise wake
     /// every view (the menu bar label too); views read it when the next visible sample redraws them.
     private(set) var history: [Moment] = []
@@ -158,7 +161,7 @@ final class Monitor: ObservableObject {
         let tab = self.tab
         // Overview and Memory list idle emulators under "What you can free": a light device check, at most once a minute.
         let devicesForFree = (tab == .overview || tab == .memory) && emulatorCount + simulatorCount > 0 && Date().timeIntervalSince(lastDevices) > 60
-        let wantDevices = visible && (tab == .devices || tab == .sessions || devicesForFree)
+        let wantDevices = visible && (tab == .devices || tab == .deviceManager || tab == .sessions || devicesForFree)
         if wantDevices { lastDevices = Date() }
         let wantMentions = visible && (tab == .devices || tab == .sessions) && Date().timeIntervalSince(lastMentions) > 30
         let wantWorktrees = worktreesNow || (visible && (tab == .worktrees || tab == .sessions || (tab == .overview && worktrees.isEmpty)) && (Date().timeIntervalSince(lastWorktrees) > 60 || worktrees.isEmpty))
@@ -186,6 +189,7 @@ final class Monitor: ObservableObject {
             let own = ps.first { $0.pid == getpid() }
             let owner = agents.owner
             let mentions = index.mentions
+            let leases = Demo.on ? [] : Leases.live()   // every refresh: the sidebar counts them on any page
             let actions = index.lastAction
             DispatchQueue.main.async {
                 self.sys = s; self.procs = ps; self.groups = groups; self.sessions = sess; self.servers = servers; self.agentOwner = owner
@@ -195,6 +199,7 @@ final class Monitor: ObservableObject {
                     let asks = Demo.on ? [] : Asks.load()
                     if asks != self.asks { self.asks = asks }
                 }
+                if leases != self.leases { self.leases = leases }
                 self.selfCPU = own?.cpu ?? 0; self.selfMem = own?.mem ?? 0
                 self.record(s, ps, groups)
                 self.running = false
@@ -524,6 +529,47 @@ final class Monitor: ObservableObject {
                 Leases.edit { $0.removeAll { $0.covers(d) } }
             }
             return r
+        }
+    }
+
+    // MARK: device manager
+
+    /// What acquire_device could boot. emulator -list-avds and simctl list take a few seconds, so at most once a minute.
+    func loadBootable(force: Bool = false) {
+        guard !Demo.on, force || Date().timeIntervalSince(bootableAt) > 60 else { return }
+        bootableAt = Date()
+        DispatchQueue.global(qos: .utility).async {
+            let avds = DeviceManager.avds(), sims = DeviceManager.simulators().filter { $0.state == "Shutdown" }
+            DispatchQueue.main.async { self.bootable = (avds, sims) }
+        }
+    }
+
+    func extendLease(_ l: Lease, minutes: Int = 30) {
+        perform("Extend \(l.name)'s lease") {
+            let until: Date? = Leases.edit { list in
+                guard let i = list.firstIndex(where: { $0.device == l.device && $0.session == l.session }) else { return nil }
+                list[i].until = max(list[i].until, Date()).addingTimeInterval(TimeInterval(minutes * 60))
+                return list[i].until
+            }
+            guard let until else { return "The lease on \(l.name) has already ended." }
+            Rules.log("lease: extended \(l.name) (\(l.device)) for session \(l.session) to \(Leases.time(until)) from the app")
+            return "\(l.name) stays leased to \(self.sessionLabel(l.session)) until \(Leases.time(until))."
+        }
+    }
+
+    func confirmEndLease(_ l: Lease) {
+        var msg = "\(l.name) (\(l.device)) is leased to \(sessionLabel(l.session)) until \(Leases.time(l.until))"
+        msg += l.purpose.isEmpty ? "." : " for \"\(l.purpose)\"."
+        msg += "\n\nEnding the lease lets other sessions be given this device and lets the clean-up treat it as idle. The device keeps running; use Shut Down on its card to stop it. The session that held it gets an error the next time it renews or releases it, and may still be using it."
+        pending = Pending(title: "End the lease on \(l.name)?", message: msg, button: "End Lease") {
+            let gone: Bool = Leases.edit { list in
+                let n = list.count
+                list.removeAll { $0.device == l.device && $0.session == l.session }
+                return list.count < n
+            }
+            guard gone else { return "The lease on \(l.name) had already ended." }
+            Rules.log("lease: ended \(l.name) (\(l.device)) for session \(l.session) from the app")
+            return "Ended \(self.sessionLabel(l.session))'s lease on \(l.name). \(l.name) keeps running; Shut Down on its card stops it."
         }
     }
 

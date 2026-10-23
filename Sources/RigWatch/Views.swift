@@ -56,6 +56,7 @@ struct RootView: View {
                     switch m.tab {
                     case .overview: OverviewView()
                     case .devices: DevicesView()
+                    case .deviceManager: DeviceManagerView()
                     case .sessions: SessionsView()
                     case .servers: DevServersView()
                     case .processes: ProcessesView()
@@ -173,6 +174,7 @@ struct Sidebar: View {
     func badge(_ p: Page) -> String? {
         switch p {
         case .devices: let n = m.emulatorCount + m.simulatorCount; return n > 0 ? String(format: "%02d", n) : nil
+        case .deviceManager: let n = m.leases.count; return n > 0 ? String(format: "%02d", n) : nil
         case .sessions: let n = m.sessions.filter(\.live).count; return n > 0 ? String(format: "%02d", n) : nil
         case .worktrees: let n = m.worktrees.filter { !$0.isMain }.count; return n > 0 ? String(format: "%02d", n) : nil
         case .servers: let n = m.servers.count; return n > 0 ? String(format: "%02d", n) : nil
