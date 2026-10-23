@@ -491,8 +491,13 @@ final class Monitor: ObservableObject {
         if !recent.isEmpty { msg += "\nRecently used by:\n" + recent.joined(separator: "\n") }
         if !d.foreground.isEmpty { msg += "\nShowing: \(d.foreground)" }
         if !working.isEmpty { msg += "\n\n⚠️ \(working.map(\.title).joined(separator: ", ")) is working right now and mentioned this device in the last few hours. Shutting it down may break that session's run." }
-        msg += d.kind == .simulator ? "\n\nRuns `simctl shutdown`." : "\n\nAsks the emulator to quit through its console (adb emu kill). SIGTERM only if it does not answer in 15 s."
-        pending = Pending(title: "Shut down \(d.name)?", message: msg, button: "Shut Down") { DeviceSampler.shutDown(d) }
+        if let c = d.claim {
+            msg += "\n\nHeld by agent-device for session \"\(c.session)\" (\(Views.tilde(c.workspace))) since \(Fmt.ago(c.since)). agent-device boots it again if it is only shut down, so this ends that session with `agent-device close --session \(c.session) --shutdown`. The agent using it loses the device until it claims one again."
+        } else {
+    msg += d.kind == .simulator ? "\n\nRuns `simctl shutdown`." : "\n\nAsks the emulator to quit through its console (adb emu kill). SIGTERM only if it does not answer in 15 s."
+        }
+        let claim = d.claim
+        pending = Pending(title: "Shut down \(d.name)?", message: msg, button: "Shut Down") { claim.map { AgentDevice.release($0, deviceName: d.name) } ?? DeviceSampler.shutDown(d) }
     }
 
     func takeScreenshot(_ d: Device) {

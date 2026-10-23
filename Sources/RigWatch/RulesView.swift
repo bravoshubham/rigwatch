@@ -115,8 +115,9 @@ struct RulesView: View {
     // MARK: queue
 
     @ViewBuilder var queue: some View {
+        let outside = Demo.on ? [] : Rules.outsideQueue(m.procs)
         if jobs.isEmpty {
-            Text("No build running or waiting").hudLabel().padding(.leading, 14)
+            Text(outside.isEmpty ? "No build running or waiting" : "No build is going through the queue right now").hudLabel().padding(.leading, 14)
         } else {
             Panel(aspect: .rules, padding: 12) {
                 VStack(alignment: .leading, spacing: 9) {
@@ -131,6 +132,26 @@ struct RulesView: View {
                             Text("pid \(j.pid)").font(.system(size: 9.5, design: .monospaced)).foregroundStyle(.tertiary).fixedSize()
                         }
                     }
+                }
+            }
+        }
+        if !outside.isEmpty {
+            SectionTitle(title: "Running outside the queue", aspect: .process, count: outside.count)
+            Panel(aspect: .process, padding: 12) {
+                VStack(alignment: .leading, spacing: 9) {
+                    ForEach(outside) { b in
+                        HStack(spacing: 10) {
+                            Chip(text: b.kind.uppercased(), color: b.kind == "xcodebuild" ? Aspect.ios.color : Aspect.android.color).fixedSize()
+                            Text(b.cwd.map { ($0 as NSString).lastPathComponent } ?? "pid \(b.pid)").font(.system(size: 12, weight: .medium)).lineLimit(1).help(b.cwd.map(Views.tilde) ?? "")
+                            if let id = b.session { SessionLink(id: id) }
+                            Text(b.reason).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Color(hex: 0xFFD23F).readable(scheme)).lineLimit(2).help(b.reason)
+                            Spacer(minLength: 8)
+                            Text(Fmt.cpu(b.cpu)).font(.system(size: 10.5, design: .monospaced)).fixedSize()
+                            Text("started \(Fmt.ago(b.since))").hudLabel().fixedSize()
+                        }
+                    }
+                    Text("These builds run at full speed next to the queued ones, so the queue can't keep the Mac responsive while they run.")
+                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
                 }
             }
         }

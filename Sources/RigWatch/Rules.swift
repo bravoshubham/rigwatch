@@ -130,9 +130,11 @@ enum Rules {
         r.matches(in: s, range: NSRange(s.startIndex..., in: s)).compactMap { Range($0.range(at: group), in: s).map { String(s[$0]) } }
     }
 
-    /// Command position: start of a line or after ; & | ( `, optionally behind VAR=x, time, nice, xcrun or
-    /// bundle exec. A build tool named inside an argument (grep xcodebuild, echo gradlew) is not a build.
-    static let cmdPos = #"(?:^|[;&|(`\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:time|xcrun|bundle\s+exec|nice(?:\s+-n\s*-?\d+)?)\s+)*"#
+    /// Command position: start of a line or after ; & | ( `, optionally behind VAR=x and the runners people
+    /// put in front of a build (time, nice, xcrun, env, bundle exec, devbox run, npx, pnpm/yarn exec,
+    /// arch -arm64, caffeinate, timeout N). A build tool named inside an argument (grep xcodebuild, echo
+    /// gradlew) is not a build.
+    static let cmdPos = #"(?:^|[;&|(`\n])\s*(?:(?:[A-Za-z_]\w*=\S*|time|xcrun|env|bundle\s+exec|devbox\s+run|npx|pnpm\s+exec|yarn\s+exec|arch\s+-\w+|caffeinate(?:\s+-\w+)*|timeout\s+\S+|nice(?:\s+-n\s*-?\d+)?)\s+)*"#
     static let heavy: [(kind: String, tool: NSRegularExpression, skip: NSRegularExpression?)] = [
         ("gradle", rx(cmdPos + #"((?:\S*/)?gradlew?)(?=\s|$)"#), rx(#"--stop|--status|--version|\btasks\b|\bdependencies\b"#)),
         ("xcodebuild", rx(cmdPos + #"(xcodebuild)(?=\s|$)"#), rx(#"-list\b|-showBuildSettings|-version\b|-showsdks|-showdestinations"#)),
@@ -228,6 +230,45 @@ enum Rules {
                   cp["tunnelState"] as? String == "connected" || cp["transportType"] as? String == "wired" else { return nil }
             return (x["deviceProperties"] as? [String: Any])?["name"] as? String ?? hw["udid"] as? String ?? "iPhone"
         }
+    }
+
+    // MARK: builds outside the queue
+
+    /// A build RigWatch can see running that did not go through `RigWatch run`, and the likely reason.
+    struct OutsideBuild: Identifiable {
+        let pid: Int32, kind: String, cwd: String?, session: String?, since: Date?, cpu: Double, reason: String
+        var id: Int32 { pid }
+    }
+
+    /// xcodebuild and Gradle builds (the wrapper's client, not its long-lived daemon) with no
+    /// `RigWatch run` above them, from this user's processes.
+    static func outsideQueue(_ procs: [Proc]) -> [OutsideBuild] {
+        let byPid = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, $0) })
+        let installed = mtime(dir + "/installed"), hook = hookInstalled()
+        func ancestors(_ p: Proc) -> [Proc] {
+            var out: [Proc] = [], x = p.ppid
+            while x > 1, out.count < 40, let q = byPid[x] { out.append(q); x = q.ppid }
+            return out
+        }
+        return procs.compactMap { p -> OutsideBuild? in
+            guard p.isOwn else { return nil }
+            let a = p.args.joined(separator: " ")
+            let kind = p.name == "xcodebuild" ? "xcodebuild" : p.name == "java" && a.contains("GradleWrapperMain") ? "gradle" : nil
+            guard let kind else { return nil }
+            let up = ancestors(p)
+            if up.contains(where: { $0.name == "RigWatch" && $0.args.dropFirst().first == "run" }) { return nil }
+            // Two xcodebuilds in one chain are one build: only the outermost is listed.
+            if kind == "xcodebuild", up.contains(where: { $0.name == "xcodebuild" }) { return nil }
+            let agent = up.first { Agent.of($0) != nil }
+            let session = p.session ?? up.lazy.compactMap(\.session).first
+            let agentStart = agent.flatMap { DeviceSampler.startDate($0.pid) }
+            let reason: String
+            if !hook { reason = "the Rules hook is not installed" }
+            else if let st = agentStart, let inst = installed, st < inst { reason = "its agent session started before Rules was turned on: restart that session to queue its builds" }
+            else if agent == nil { reason = "not started from an agent session" }
+            else { reason = "started inside a script or tool the hook can't see into" }
+            return OutsideBuild(pid: p.pid, kind: kind, cwd: ProcSampler.cwd(p.pid), session: session, since: DeviceSampler.startDate(p.pid), cpu: p.cpu, reason: reason)
+        }.sorted { ($0.since ?? .distantPast) < ($1.since ?? .distantPast) }
     }
 
     // MARK: hook
@@ -545,6 +586,7 @@ enum Rules {
             let idle = now.timeIntervalSince(last)
             let name = "\(d.name) (\(d.id))"
             if pinned.contains(d.id) || pinned.contains(d.name) { r.kept.append("\(name): pinned"); continue }
+            if let c = d.claim { r.kept.append("\(name): held by agent-device for session \(c.session)"); continue }
             // Only what an agent started: a device a person opened may be in use without any command naming it.
             guard d.launchedBy != nil || agentBooted(d) else { r.kept.append("\(name): not started by an agent session"); continue }
             guard idle > limit else { r.kept.append("\(name): used \(Fmt.ago(last))"); continue }
@@ -764,6 +806,7 @@ enum Rules {
                    "memory pressure \(pressure()) (1 normal, 2 warning, 4 critical) · \(load(j)) of \(limit(s)) slot units in use (a build takes 2)"]
         out += j.map { "  \($0.state.padding(toLength: 8, withPad: " ", startingAt: 0)) \($0.kind.padding(toLength: 10, withPad: " ", startingAt: 0)) \(Int(Date().timeIntervalSince($0.since))) s  \(Views.tilde($0.cwd))  \($0.cmd.prefix(80))" }
         let procs = ProcSampler().sample()
+        out += outsideQueue(procs).map { "  outside  \($0.kind.padding(toLength: 10, withPad: " ", startingAt: 0)) pid \($0.pid)  \($0.cwd.map(Views.tilde) ?? "?")  \($0.reason)" }
         for plat in ["android", "ios"] {
             let (phys, virt) = devices(plat, procs: procs)
             out.append("\(plat): physical \(phys.isEmpty ? "none" : phys.joined(separator: ", ")); virtual \(virt.isEmpty ? "none" : virt.map { "\($0.name) \($0.id) up \(Fmt.ago($0.started).replacingOccurrences(of: " ago", with: ""))" }.joined(separator: ", "))")

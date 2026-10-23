@@ -14,6 +14,7 @@ struct Device: Identifiable {
     var mem: UInt64 = 0
     var started: Date?
     var launchedBy: String?        // session id from the emulator's environment
+    var claim: AgentDevice.Claim?  // agent-device holds it for an agent session (it boots it again if shut down)
     var recentUsers: [String: Date] = [:]
     var lastAction: (session: String, command: String, at: Date)?
     var foreground = ""            // top activity / running apps
@@ -116,6 +117,8 @@ final class DeviceSampler {
             for d in out where d.serial != nil && d.state == "device" { details[d.id] = probe(d.id) }
         }
         for i in out.indices { if let x = details[out[i].id] { out[i].foreground = out[i].foreground.isEmpty ? x.fg : out[i].foreground; out[i].screen = x.screen; out[i].guestLoad = x.load } }
+        let claims = AgentDevice.claims()
+        for i in out.indices { out[i].claim = claims[out[i].id] }
         return out
     }
 
