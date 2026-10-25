@@ -8,7 +8,7 @@ struct BuildsView: View {
     private let green = Color(hex: 0x3DDC97), amber = Color(hex: 0xFFD23F), orange = Color(hex: 0xFF8A3D), red = Color(hex: 0xFF4D5E)
 
     var body: some View {
-        let s = RuleSettings.load()
+        let s = Demo.on ? RuleSettings() : RuleSettings.load()
         let running = m.jobs.filter { $0.state == "running" }.sorted { $0.since < $1.since }
         let waiting = m.jobs.filter { $0.state == "waiting" }.sorted { ($0.queuedAt ?? $0.since) < ($1.queuedAt ?? $1.since) }
         ScrollView {

@@ -5,7 +5,7 @@ import SwiftUI
 struct DeviceManagerView: View {
     @ObservedObject private var m = Monitor.shared
     @Environment(\.colorScheme) private var scheme
-    @State private var registered = Rules.mcpInstalled()
+    @State private var registered = Demo.on || Rules.mcpInstalled()
 
     enum Hold: Int { case leased, inUse, held, free }
     func hold(_ d: Device) -> Hold { d.lease.map { $0.isImplicit ? .inUse : .leased } ?? (d.claim != nil ? .held : .free) }
@@ -42,7 +42,7 @@ struct DeviceManagerView: View {
                     .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
             }.padding(20)
         }
-        .onAppear { registered = Rules.mcpInstalled(); m.loadBootable(force: m.bootable == nil) }
+        .onAppear { registered = Demo.on || Rules.mcpInstalled(); m.loadBootable(force: m.bootable == nil) }
         .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { _ in m.loadBootable() }
     }
 
@@ -56,7 +56,7 @@ struct DeviceManagerView: View {
     }
 
     func header(_ devs: [Device]) -> some View {
-        let s = RuleSettings.load()
+        let s = Demo.on ? RuleSettings() : RuleSettings.load()
         let leased = devs.filter { hold($0) == .leased }.count, held = devs.filter { hold($0) == .held }.count, free = devs.filter { hold($0) == .free }.count
         let inUse = devs.filter { hold($0) == .inUse }.count
         return Panel(aspect: .android) {

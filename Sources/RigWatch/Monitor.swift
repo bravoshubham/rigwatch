@@ -160,6 +160,9 @@ final class Monitor: ObservableObject {
             if history.isEmpty { history = Demo.history() }
             servers = Demo.servers(tick); sessions = Self.attach(servers, to: Demo.sessions(tick))
             if worktrees.isEmpty { worktrees = Demo.worktrees() }
+            leases = Demo.leases(); jobs = Demo.jobs(); outside = Demo.outside(); governed = Set(outside.map(\.pid))
+            if buildHistory.isEmpty { buildHistory = Demo.buildHistory() }
+            if bootable == nil { bootable = Demo.bootable() }
             selfCPU = 0.5; selfMem = 140 << 20
             record(sys, procs, groups)
             return
@@ -590,6 +593,7 @@ final class Monitor: ObservableObject {
 
     /// CPU of a process and everything under it.
     func treeCPU(_ pid: Int32) -> Double {
+        if Demo.on, let c = Demo.buildCPU(pid) { return c }
         var kids: [Int32: [Int32]] = [:]
         for p in procs { kids[p.ppid, default: []].append(p.pid) }
         var cpu = 0.0, stack = [pid]

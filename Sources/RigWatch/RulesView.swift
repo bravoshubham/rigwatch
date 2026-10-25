@@ -52,7 +52,7 @@ struct RulesView: View {
 
     func reload() {
         if Demo.on {
-            jobs = Demo.jobs(); log = Demo.ruleLog(); hook = true; agent = true
+            jobs = Demo.jobs(); log = Demo.ruleLog(); hook = true; agent = true; mcp = true
             if report == nil { report = Demo.reapReport() }
             return
         }

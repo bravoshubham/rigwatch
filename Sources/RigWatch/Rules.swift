@@ -1047,6 +1047,7 @@ final class BuildGovernor {
     static let nice: Int32 = 10
     /// RIGWATCH_GOVERN=1 governs without the hook installed (for testing on a Mac with the rules off).
     static var active: Bool {
+        if Demo.on { return true }
         let s = RuleSettings.load()
         return s.lowerOutside && !s.paused && (Rules.hookInstalled() || ProcessInfo.processInfo.environment["RIGWATCH_GOVERN"] == "1")
     }

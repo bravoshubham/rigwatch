@@ -115,6 +115,7 @@ enum Demo {
                              diskRead: 0, diskWrite: 0, group: g.group, session: nil, hostSession: nil, args: [])
                 if g.group == "Gradle" || g.group == "Android emulators" { p.diskWrite = wob(2_400_000, tick, gi + k, 0.6); p.diskRead = wob(900_000, tick, gi + k + 3, 0.6) }
                 if g.group == "Xcode / Swift" && k == 0 { p.diskRead = wob(1_200_000, tick, 5, 0.5) }
+                if k == 0, let gpu = ["WindowServer": 9.0, "Local models": 22, "Android emulators": 6, "Google Chrome": 3.2, "Figma": 1.8][g.group] { p.gpu = wob(gpu, tick, gi) }
                 if g.name == "swift-frontend" { p.session = sessionSeed[2].id; p.mem = UInt64(Double(g.mem) / Double(g.n)); p.cpu = wob(g.cpu / Double(g.n), tick, gi * 31 + k, 0.08) }
                 if g.group == "Claude Code sessions", let c = [0, 3, 4, 5].dropFirst(0).enumerated().first(where: { $0.offset == k })?.element { p.session = sessionSeed[c].id }
                 out.append(p)
@@ -180,7 +181,25 @@ enum Demo {
         t.cpu = wob(9, tick, 3); t.mem = 4_300 * mb; t.started = ago(26 * 3600); t.screen = "Asleep"; t.guestLoad = "0.31 0.28 0.30"
         var c = Device(id: "R5CT1234ABC", kind: .phone, name: "Galaxy S24", detail: "SM_S921B", state: "device")
         c.foreground = "com.acme.shop/com.acme.shop.HomeActivity"; c.screen = "Asleep"
-        return [a, b, t, c]
+        b.claim = AgentDevice.Claim(session: "widget-snapshots", workspace: "/Users/demo/code/acme-shop-ios", since: ago(2_400))
+        var out = [a, b, t, c]
+        for i in out.indices { out[i].lease = leases().first { $0.covers(out[i]) } }
+        return out
+    }
+
+    /// The Pixel lent through the device manager; the Galaxy in use by a session that drives it with adb directly.
+    static func leases() -> [Lease] {
+        [Lease(device: "emulator-5554", name: "Pixel_8_API_35", platform: "android", session: sessionSeed[0].id, ownerPid: 0, ownerStart: 0,
+               purpose: "Checkout retry on a flaky network", since: ago(1_500), until: now.addingTimeInterval(1_260), booted: true),
+         Lease(device: "R5CT1234ABC", name: "R5CT1234ABC", platform: "android", physical: true, session: sessionSeed[1].id, ownerPid: 0, ownerStart: 0,
+               since: ago(600), until: now.addingTimeInterval(Leases.renewOnUse - 140), implicit: true)]
+    }
+
+    static func bootable() -> (avds: [String], sims: [DeviceManager.Sim]) {
+        let v = [18, 2]
+        return (["Pixel_8_API_35", "Pixel_Tablet_API_34", "Pixel_Fold_API_35", "Medium_Phone_API_35"],
+                ["iPhone 16", "iPhone 16 Pro Max", "iPhone SE (3rd generation)", "iPad Air 11-inch (M2)"].enumerated().map { i, n in
+                    DeviceManager.Sim(udid: String(format: "C0FFEE%02d-0000-4000-8000-0000000000%02d", i, i), name: n, runtime: "iOS 18.2", version: v, state: "Shutdown") })
     }
 
     /// Agent sessions other than Claude Code own their processes by tree, not by environment.
@@ -255,11 +274,43 @@ enum Demo {
         let c = "/Users/demo/code/"
         return [
             BuildJob(pid: 20_901, start: 0, kind: "gradle", weight: 2, cwd: c + "acme-shop-android/.worktrees/fix-double-charge",
-                     cmd: "./gradlew --max-workers=6 :app:assembleDebug", state: "running", since: ago(140)),
+                     cmd: "./gradlew --max-workers=6 :app:assembleDebug", state: "running", since: ago(140), session: sessionSeed[0].id, queuedAt: ago(150)),
             BuildJob(pid: 20_944, start: 0, kind: "xcodebuild", weight: 2, cwd: c + "acme-shop-ios/.worktrees/order-widget",
-                     cmd: "xcodebuild -jobs 6 -scheme AcmeShop -destination 'platform=iOS Simulator,name=iPhone 16 Pro' build", state: "running", since: ago(65)),
+                     cmd: "xcodebuild -jobs 6 -scheme AcmeShop -destination 'platform=iOS Simulator,name=iPhone 16 Pro' build", state: "running", since: ago(65), session: sessionSeed[2].id, queuedAt: ago(70)),
+            BuildJob(pid: 20_958, start: 0, kind: "gradle", weight: 2, cwd: c + "acme-shop-android/.worktrees/release-notes",
+                     cmd: "./gradlew --max-workers=6 :app:bundleRelease", state: "running", since: ago(30), session: sessionSeed[5].id, queuedAt: ago(95)),
             BuildJob(pid: 20_970, start: 0, kind: "gradle", weight: 2, cwd: c + "acme-shop-android/.worktrees/compose-settings",
-                     cmd: "./gradlew --max-workers=6 testDebugUnitTest", state: "waiting", since: ago(38)),
+                     cmd: "./gradlew --max-workers=6 testDebugUnitTest", state: "waiting", since: ago(38), session: sessionSeed[1].id, queuedAt: ago(38)),
+            BuildJob(pid: 20_985, start: 0, kind: "xcodebuild", weight: 2, cwd: c + "acme-design-system",
+                     cmd: "xcodebuild -jobs 6 -scheme DesignSystem test", state: "waiting", since: ago(21), session: sessionSeed[3].id, queuedAt: ago(21)),
+        ]
+    }
+
+    /// A Swift build an agent started inside a script, which the hook can't see into.
+    static func outside() -> [Rules.OutsideBuild] {
+        [Rules.OutsideBuild(pid: 20_990, kind: "xcodebuild", cwd: "/Users/demo/code/acme-shop-ios", session: sessionSeed[2].id, since: ago(260), cpu: 310,
+                            reason: "started inside a script or tool the hook can't see into")]
+    }
+
+    static func buildCPU(_ pid: Int32) -> Double? { [20_901: 412, 20_944: 520, 20_958: 365, 20_990: 310][pid] }
+
+    static func buildHistory() -> [BuildRecord] {
+        let c = "/Users/demo/code/"
+        func r(_ kind: String, _ dir: String, _ s: Int, _ endedAgo: TimeInterval, waited: TimeInterval, ran: TimeInterval,
+               overflow: Bool = false, forced: Bool = false, early: Bool = false, exit: Int32 = 0) -> BuildRecord {
+            let end = ago(endedAgo), start = end.addingTimeInterval(-ran)
+            return BuildRecord(kind: kind, pool: kind == "xcodebuild" ? "ios" : "android", cwd: c + dir, cmd: "", session: sessionSeed[s].id,
+                               queuedAt: start.addingTimeInterval(-waited), startedAt: start, endedAt: end, waited: waited,
+                               overflow: overflow, forced: forced, releasedEarly: early, exit: exit)
+        }
+        return [
+            r("gradle", "acme-shop-android/.worktrees/fix-double-charge", 0, 300, waited: 14, ran: 182, early: true),
+            r("xcodebuild", "acme-shop-ios/.worktrees/order-widget", 2, 720, waited: 0, ran: 410),
+            r("gradle", "acme-shop-android/.worktrees/compose-settings", 1, 1_380, waited: 600, ran: 240, overflow: true),
+            r("install", "acme-web", 4, 1_900, waited: 3, ran: 48),
+            r("xcodebuild", "acme-design-system", 3, 2_600, waited: 95, ran: 300, forced: true, exit: 65),
+            r("gradle", "acme-shop-android", 5, 3_400, waited: 0, ran: 156),
+            r("xcodebuild", "acme-shop-ios", 2, 5_200, waited: 210, ran: 388, early: true),
         ]
     }
 
