@@ -60,15 +60,23 @@ Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups eve
 </p>
 <p align="center">
   <img src="docs/screenshots/devices-dark.png" width="49%" alt="Emulators and simulators">
+  <img src="docs/screenshots/device-manager-dark.png" width="49%" alt="Device Manager: who holds each device">
+</p>
+<p align="center">
+  <img src="docs/screenshots/builds-dark.png" width="49%" alt="Builds: Android and iOS slots, waiting, outside the queue, history">
+  <img src="docs/screenshots/rules-dark.png" width="49%" alt="Rules">
+</p>
+<p align="center">
   <img src="docs/screenshots/worktrees-dark.png" width="49%" alt="Worktrees">
+  <img src="docs/screenshots/processes-dark.png" width="49%" alt="Processes, with each process's GPU share">
 </p>
 <p align="center">
-  <img src="docs/screenshots/processes-dark.png" width="49%" alt="Processes">
   <img src="docs/screenshots/memory-dark.png" width="49%" alt="Memory">
+  <img src="docs/screenshots/disk-dark.png" width="49%" alt="Disk map">
 </p>
 <p align="center">
-  <img src="docs/screenshots/disk-dark.png" width="49%" alt="Disk map">
   <img src="docs/screenshots/overview-light.png" width="49%" alt="Overview, light theme">
+  <img src="docs/screenshots/sessions-light.png" width="49%" alt="Agent sessions, light theme">
 </p>
 <p align="center">
   <img src="docs/screenshots/servers-light.png" width="49%" alt="Dev servers, light theme">
