@@ -40,17 +40,19 @@ Activity Monitor shows all of it as 700 unrelated processes. RigWatch groups eve
 
 | Page | What you get |
 | --- | --- |
-| **Overview** | A chip-die map of what is using the machine, sized by memory or CPU; what is still available is a thin bar under it. Click any block to see what's inside it, with the biggest processes listed and explained. Live CPU, memory, GPU load and GPU memory, disk, network and chip temperature, so a local model's load is visible next to everything else. |
+| **Overview** | A chip-die map of what is using the machine, sized by memory or CPU; what is still available is a thin bar under it. Click any block to see what's inside it, with the biggest processes listed and explained. Live CPU, memory, GPU load and GPU memory, disk, network and chip temperature, so a local model's load is visible next to everything else, and which processes are using the GPU (WindowServer, a browser, a local model), from the graphics driver's own per-process counters. |
 | **Top CPU and memory** | Click the CPU or memory gauge (or the top bar) for what is using it right now: each group's biggest processes, who started them (agent session, dev server, emulator, app, macOS) and one action for each: Quit session, Stop, Shut down, Quit app or Quit. macOS's own processes get a plain-words note instead (kernel_task, WindowServer, Spotlight's mds_stores, photoanalysisd, iCloud's bird and 40 more): what it is, why it is busy, and what to do, often nothing. |
 | **When CPU spikes** | CPU at 70% or more for two samples in a row puts a banner on Overview naming the top culprits, their share and who started them, e.g. `swift-frontend ×14 (started by <session>) 56%`. A timeline keeps the last 15 minutes in memory; click any bar to see what was on top at that moment, including spikes that happened while the window was closed. |
 | **Agent Sessions** | Every coding agent running, with its CPU, memory, devices, worktrees and every process it started: dev servers, test runners, MCP servers, builds. Claude Code, OpenCode and Codex also show the session title and last prompt, and can be resumed. Cursor, Windsurf, T3 Code, Gemini CLI, Aider, Goose and Amp are recognised from their processes. |
 | **Dev Servers** | Every local server you started, by the port it listens on: a framework guess (Vite, Next.js, Storybook, Rails, Django, uvicorn and more), project folder, uptime, CPU and memory, and which agent session started it. That link is remembered, so a server left running after its session ended still says who started it. Open it in the browser, or stop it behind a confirmation. |
-| **Emulators & Simulators** | Each Android emulator and iOS simulator: what it's showing, which session launched it, the last command a session ran on it, a live screen, and a graceful shut-down. |
-| **Processes** | Grouped by app or tool, with CPU on one scale (100% = the whole machine) and quit or force-quit behind a confirmation. |
+| **Emulators & Simulators** | Each Android emulator and iOS simulator: what it's showing, which session launched it, the last command a session ran on it, whether it is leased, in use or held by agent-device, a live screen that opens at once, **Ask session** (is it safe to shut down?), and a graceful shut-down that also ends an agent-device hold, so it stays off. |
+| **Device Manager** | Every phone, emulator and simulator agents can be given, and who holds it: free, leased to a session (purpose, until when, booted by RigWatch), in use by a session that drives it directly, or held by agent-device. Extend a lease, end it, or mark a device free; running counts against the limits, and the AVDs and simulators RigWatch could boot. See [Hand out devices](#rules-one-mac-many-agents). |
+| **Builds** | Every Gradle, `xcodebuild` and install build: what holds an Android or iOS slot, what waits (its place, how long, and when it starts at the latest), what runs outside the queue and whether its priority is lowered, and recent builds with time waited and run. Start a waiting build now, cancel it, or stop a running one. |
+| **Processes** | Grouped by app or tool, with CPU on one scale (100% = the whole machine), each process's share of GPU time, and quit or force-quit behind a confirmation. |
 | **Memory** | Where the RAM went: apps, wired, compressed, file cache, swap and pressure, and **what you can free**: idle emulators and simulators, dormant agent sessions, abandoned dev servers, a loaded local model and big apps, each with its size and one button, adding up to "you could free ~X GB". GPU memory (a local model's weights) is counted once, in the process that holds it, not again as Kernel & drivers. |
 | **Worktrees** | Every `git worktree` under your home folders, which session made it, how much disk it takes, whether anything is using it, and a remove that refuses to lose uncommitted or unpushed work. |
 | **Disk** | The whole drive as a chip-die map of folders. Click into any folder; right-click to show it in Finder. |
-| **Rules** | Keeps the Mac usable while many agent sessions build at once: a machine-wide build queue, physical devices before emulators, and a clean-up of idle emulators, simulators, worktrees and DerivedData. Off until you turn it on. See [Rules](#rules-one-mac-many-agents). |
+| **Rules** | Keeps the Mac usable while many agent sessions build at once: an Android and an iOS build queue, a device manager agents get devices from, physical devices before emulators, a limit on running emulators and simulators, and a clean-up of idle emulators, simulators, worktrees and DerivedData. Off until you turn it on. See [Rules](#rules-one-mac-many-agents). |
 
 <p align="center">
   <img src="docs/screenshots/sessions-dark.png" width="49%" alt="Agent sessions">
@@ -92,6 +94,10 @@ at once, desktop app and terminal alike:
 - **Physical devices first.** Booting an emulator or simulator is refused while a phone of that kind
   is connected or another virtual one is already running. `RIGWATCH_VIRTUAL=1` in front of the command
   lets it through.
+- **Limit running emulators and simulators** (2 of each by default). Past the limit an agent's boot
+  command is refused, with no override, and `acquire_device` boots nothing. Boots RigWatch can't see
+  (Xcode, a test run, other device tools) still happen; the Device Manager page shows when the limit
+  is passed.
 - **Shut down idle emulators and simulators** after 30 minutes with no command or device tool naming
   them (10 with a phone connected). Only ones an agent session started; one you opened yourself is
   never shut down. Pin one to keep it.
@@ -116,7 +122,12 @@ at once, desktop app and terminal alike:
   alone. Commands naming the device keep the lease going; it ends when the session releases it
   (`release_device` shuts down what RigWatch booted), when it runs out (30 minutes by default), or as
   soon as the session's Claude Code process exits. `list_devices`, `renew_device` and `build_queue`
-  round it off. Leased devices show a **Leased** chip on their card.
+  round it off. Using a device directly counts too: when a session's command names a device (`adb -s`,
+  `ANDROID_SERIAL`, a simulator UDID, a device tool's serial, or plain `adb` or a Gradle install with
+  one device connected), that session holds it, as **In use**, until 20 minutes after its last use,
+  so the device manager won't hand it to another session. Devices held by
+  [agent-device](https://github.com/callstack/agent-device) are respected as well: RigWatch
+  never hands them out, the clean-up keeps them, and Shut Down ends the hold so they stay off.
 
 **Turn on** adds a `PreToolUse` hook to `~/.claude/settings.json` (the old file is kept as
 `settings.json.rigwatch-backup`), registers the MCP server for every Claude Code session
@@ -136,7 +147,9 @@ RigWatch install|uninstall          turn the rules on or off
 ```
 
 (`RigWatch` is `~/Applications/RigWatch.app/Contents/MacOS/RigWatch`, or `rigwatch` with Homebrew.)
-The hook adds about 30 ms to a tool call. Sessions of other agents are not routed through it yet.
+The hook adds about 30 ms to a tool call. Sessions of other agents are not routed through it yet,
+and a Claude Code session started before the rules were turned on keeps running without them until it
+is restarted (the Builds page says which builds that leaves outside the queue).
 
 ## Install
 
