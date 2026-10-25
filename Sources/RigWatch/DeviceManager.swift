@@ -278,6 +278,9 @@ enum MCPServer {
              ["id": ["type": "string"], "minutes": ["type": "integer", "minimum": 1, "maximum": Leases.maxMinutes]], required: ["id"]),
         tool("release_device", "Give a device back when you are done. A device RigWatch booted for you is shut down unless shutdown is false; one that was already running keeps running.",
              ["id": ["type": "string"], "shutdown": ["type": "boolean"]], required: ["id"]),
+        tool("prepare_worktree", "Prepare a new worktree before its first install or build: copies in node_modules, CocoaPods' Pods and Xcode's package and module caches from another worktree or RigWatch's store when they match this worktree's lockfiles (an APFS clone: seconds, no extra disk). The install afterwards only checks them. Builds and installs run through RigWatch do this on their own; call it to have it done up front.",
+             ["path": ["type": "string", "description": "The worktree (or any folder in it). Defaults to the current directory."],
+              "derived_data_path": ["type": "string", "description": "The -derivedDataPath your xcodebuild uses, if any, relative to the worktree."]], required: []),
         tool("build_queue", "Show RigWatch's build queue: Android and iOS slots, running and waiting builds, and memory pressure.", [:], required: []),
     ]
 
@@ -288,7 +291,9 @@ enum MCPServer {
     static let instructions = """
     RigWatch manages the emulators, simulators and phones on this Mac for every agent session. Before using a device, \
     call acquire_device with the platform; use the id it returns; call release_device when you are done. Do not boot \
-    emulators or simulators yourself, and do not use a device leased to another session.
+    emulators or simulators yourself, and do not use a device leased to another session. In a new worktree, call \
+    prepare_worktree before the first install or build: it copies in node_modules, Pods and Xcode caches that match \
+    its lockfiles, so the first build isn't a cold one.
     """
 
     static func main() -> Int32 {
@@ -335,6 +340,13 @@ enum MCPServer {
                 guard let id = str("id") else { throw DeviceManager.Failure(message: "id is required") }
                 out = try DeviceManager.release(id, shutdown: a["shutdown"] as? Bool)
             case "build_queue": out = Rules.status()
+            case "prepare_worktree":
+                let start = (str("path").map { ($0 as NSString).expandingTildeInPath }) ?? FileManager.default.currentDirectoryPath
+                guard let root = Rules.roots("", cwd: start).first else { throw DeviceManager.Failure(message: "\(start) is not inside a git worktree.") }
+                var notes = DepCache.prepare(root)
+                if let dd = str("derived_data_path") { notes += DepCache.prepareDerivedData(cmd: "xcodebuild -derivedDataPath '\(dd)'", cwd: root) }
+                let have = DepCache.spots(root).map { s in "\(s.rel.isEmpty ? "" : s.rel + "/")\(s.kind.folder): \(FileManager.default.fileExists(atPath: DepCache.path(root, s.rel) + "/" + s.kind.folder) ? "present" : "missing (no match for this lockfile yet; install it, and RigWatch keeps it for the next worktree)")" }
+                out = ["worktree": Views.tilde(root), "done": notes.isEmpty ? ["nothing to copy"] : notes, "now": have]
             default: throw DeviceManager.Failure(message: "Unknown tool \(name)")
             }
             let text = (out as? String) ?? String(decoding: (try? JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])) ?? Data(), as: UTF8.self)

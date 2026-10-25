@@ -99,6 +99,14 @@ at once, desktop app and terminal alike:
   and keeps working. Builds the hook can't see (inside scripts and other tools) and Gradle's daemons
   run at lower priority instead. The **Builds** page shows what holds a slot, what waits and until
   when, what runs outside the queue, and recent builds, with Start now, Cancel and Stop.
+- **Share dependencies between worktrees.** A new worktree gets `node_modules`, CocoaPods' `Pods` and
+  Xcode's resolved packages, module cache and compilation cache (with `-derivedDataPath`) as APFS
+  clones, from another worktree of the repository or RigWatch's store, whenever they match its
+  lockfile (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Podfile.lock`). It happens before
+  any install or build that goes through RigWatch, and on request with the MCP tool
+  `prepare_worktree`; the install then only checks, instead of downloading gigabytes again. Each
+  successful install refills the store. Only into folders git ignores. A build alone on the Mac gets
+  more threads than the minimum set on the Rules page, up to all cores but two.
 - **Physical devices first.** Booting an emulator or simulator is refused while a phone of that kind
   is connected or another virtual one is already running. `RIGWATCH_VIRTUAL=1` in front of the command
   lets it through.
@@ -129,8 +137,8 @@ at once, desktop app and terminal alike:
   it, the hook warns a session that names a device leased to another, and the clean-up leaves it
   alone. Commands naming the device keep the lease going; it ends when the session releases it
   (`release_device` shuts down what RigWatch booted), when it runs out (30 minutes by default), or as
-  soon as the session's Claude Code process exits. `list_devices`, `renew_device` and `build_queue`
-  round it off. Using a device directly counts too: when a session's command names a device (`adb -s`,
+  soon as the session's Claude Code process exits. `list_devices`, `renew_device`, `prepare_worktree` and
+  `build_queue` round it off. Using a device directly counts too: when a session's command names a device (`adb -s`,
   `ANDROID_SERIAL`, a simulator UDID, a device tool's serial, or plain `adb` or a Gradle install with
   one device connected), that session holds it, as **In use**, until 20 minutes after its last use,
   so the device manager won't hand it to another session. Devices held by

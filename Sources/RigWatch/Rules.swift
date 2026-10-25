@@ -107,7 +107,7 @@ enum Rules {
     static let dir = Sh.home + "/Library/Application Support/RigWatch"
     static let settingsFile = dir + "/rules.json", jobsFile = dir + "/jobs.json", pinsFile = dir + "/pins.json"
     static let reportFile = dir + "/last-reap.json", logFile = dir + "/actions.log"
-    static let touchDir = dir + "/touch", cacheDir = dir + "/node_modules"
+    static let touchDir = dir + "/touch"
     static let weights = ["gradle": 2, "xcodebuild": 2, "install": 1]   // a slot is 2: one heavy build or two installs
     static let agentLabel = "dev.rigwatch.reaper"
     static let agentPlist = Sh.home + "/Library/LaunchAgents/\(agentLabel).plist"
@@ -149,7 +149,7 @@ enum Rules {
     static let heavy: [(kind: String, tool: NSRegularExpression, skip: NSRegularExpression?)] = [
         ("gradle", rx(cmdPos + #"((?:\S*/)?gradlew?)(?=\s|$)"#), rx(#"--stop|--status|--version|\btasks\b|\bdependencies\b"#)),
         ("xcodebuild", rx(cmdPos + #"(xcodebuild)(?=\s|$)"#), rx(#"-list\b|-showBuildSettings|-version\b|-showsdks|-showdestinations"#)),
-        ("install", rx(cmdPos + #"(npm\s+(?:ci|install|i)\b|pod\s+install\b|yarn(?:\s+install)?\s*(?=$|[;&|]))"#), nil),
+        ("install", rx(cmdPos + #"(npm\s+(?:ci|install|i)\b|pnpm\s+(?:install|i)\b|pod\s+install\b|yarn(?:\s+install)?(?:\s+--?[\w-]+(?:=\S+)?)*\s*(?=$|[;&|)]))"#), nil),
     ]
     static let boot: [(plat: String, rx: NSRegularExpression)] = [
         ("android", rx(#"(^|[\s;&|/])emulator\s[^;&|]*(-avd\s|@\w)"#)),
@@ -164,6 +164,14 @@ enum Rules {
 
     static func classify(_ cmd: String) -> String? {
         heavy.first { has($0.tool, cmd) && !($0.skip.map { has($0, cmd) } ?? false) }?.kind
+    }
+
+    /// Threads for the next build: the Rules' number at least, more when few builds run, so a build alone on the
+    /// Mac isn't held to a third of its cores. Two cores always stay free for everything else.
+    static func threads(_ s: RuleSettings) -> Int {
+        let cores = ProcessInfo.processInfo.activeProcessorCount
+        let running = jobs().filter { $0.state == "running" && $0.kind != "install" }.count
+        return max(1, min(cores - 2, max(s.buildThreads, (cores - 2) / (running + 1))))
     }
 
     /// Caps a build's threads: `--max-workers` for Gradle, `-jobs` for xcodebuild, unless the command sets its own.
@@ -184,7 +192,7 @@ enum Rules {
         if s.physicalFirst, let why = bootBlock(cmd) { return .deny(why) }
         noteBoot(cmd)
         guard s.queueBuilds, !cmd.contains(" run --kind "), let kind = classify(cmd) else { return .leave }
-        return .wrap("\(quote(exe)) run --kind \(kind) -- /bin/zsh -c \(quote(withThreads(cmd, kind: kind, n: s.buildThreads)))", kind)
+        return .wrap("\(quote(exe)) run --kind \(kind) -- /bin/zsh -c \(quote(withThreads(cmd, kind: kind, n: threads(s))))", kind)
     }
 
     /// Records that a command used a platform's devices, and which ones it named, for the idle check.
@@ -457,6 +465,10 @@ enum Rules {
             src.setEventHandler { if child > 0 { kill(child, sig) } else { release(); exit(128 + sig) } }
             src.resume(); sources.append(src)
         }
+        // A new worktree gets node_modules, Pods and Xcode caches matching its lockfiles before anything runs.
+        let roots = roots(line, cwd: me.cwd)
+        for r in roots { for n in DepCache.prepare(r) { say("RigWatch: " + n) } }
+        if k == "xcodebuild" { for n in DepCache.prepareDerivedData(cmd: line, cwd: me.cwd) { say("RigWatch: " + n) } }
         let queue = s.queueBuilds && !s.paused, p = pool(me)
         let t0 = Date(), maxWait = TimeInterval(max(1, s.maxWaitMinutes) * 60)
         var last = "", overflow = false, forced = false
@@ -487,7 +499,6 @@ enum Rules {
         if overflow { say("RigWatch: waited \(Int(waited / 60)) min for a slot; starting now at background priority, so it can't slow the Mac down.") }
         else if forced { say("RigWatch: started from the Builds page after \(Int(waited)) s.") }
         else if waited > 3 { say("RigWatch: slot granted after \(Int(waited)) s") }
-        if k != "install" { for r in roots(line, cwd: me.cwd) { ensureNodeModules(r) } }
         // The slot is for the build tool itself: once it has run and exited, the rest of the command
         // (installs, logcat, waits) goes on without holding back the next build.
         var early = false
@@ -511,6 +522,7 @@ enum Rules {
         let started = Date()
         let code = spawn((overflow ? ["/usr/sbin/taskpolicy", "-b"] : ["/usr/sbin/taskpolicy", "-c", "utility"]) + a)
         release()
+        if code == 0 { for r in roots { DepCache.seed(r) } }   // the next worktree with these lockfiles starts from here
         BuildHistory.add(BuildRecord(kind: k, pool: p, cwd: me.cwd, cmd: me.cmd, session: session, queuedAt: t0, startedAt: started,
                                      endedAt: Date(), waited: waited, overflow: overflow, forced: forced, releasedEarly: early, exit: code))
         withExtendedLifetime(sources) {}
@@ -569,52 +581,6 @@ enum Rules {
             let t = Sh.git(["rev-parse", "--show-toplevel"], in: d).out.trimmingCharacters(in: .whitespacesAndNewlines)
             return t.isEmpty ? nil : t
         })
-    }
-
-    // MARK: node_modules cache
-
-    /// The lockfile and patches/ (patch-package) a node_modules was installed from.
-    static func lockHash(_ root: String) -> String? {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: root + "/package.json"), let lock = fm.contents(atPath: root + "/package-lock.json") else { return nil }
-        var h = SHA256()
-        h.update(data: lock)
-        let patches = root + "/patches"
-        for rel in ((fm.enumerator(atPath: patches)?.allObjects as? [String]) ?? []).sorted() {
-            if let d = fm.contents(atPath: patches + "/" + rel) { h.update(data: Data(rel.utf8)); h.update(data: d) }
-        }
-        return h.finalize().prefix(8).map { String(format: "%02x", $0) }.joined()
-    }
-
-    /// A worktree without node_modules gets the cached one for its lockfile: an APFS clone, seconds, no extra disk.
-    static func ensureNodeModules(_ root: String) {
-        guard let h = lockHash(root), !FileManager.default.fileExists(atPath: root + "/node_modules") else { return }
-        let src = cacheDir + "/" + h + "/node_modules"
-        guard isDir(src) else { return }
-        say("RigWatch: cloning cached node_modules (\(h)) into \(Views.tilde(root))")
-        _ = Sh.run("/bin/cp", ["-cR", src, root + "/node_modules"], timeout: 900)
-        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: cacheDir + "/" + h)
-    }
-
-    /// Keeps a worktree's node_modules before it is deleted, if npm installed it after the lockfile last
-    /// changed. True when the cache holds it (or would, on a dry run).
-    static func seedNodeModules(_ root: String, apply: Bool) -> Bool {
-        let nm = root + "/node_modules", fm = FileManager.default
-        guard let h = lockHash(root), let installed = mtime(nm + "/.package-lock.json"), let lock = mtime(root + "/package-lock.json"), installed >= lock else { return false }
-        let dst = cacheDir + "/" + h
-        if isDir(dst + "/node_modules") { return true }
-        guard apply else { return true }
-        try? fm.createDirectory(atPath: dst, withIntermediateDirectories: true)
-        guard Sh.run("/bin/cp", ["-cR", nm, dst + "/node_modules.tmp"], timeout: 900).code == 0,
-              (try? fm.moveItem(atPath: dst + "/node_modules.tmp", toPath: dst + "/node_modules")) != nil else {
-            try? fm.removeItem(atPath: dst); return false
-        }
-        log("cached node_modules \(h) from \(Views.tilde(root))")
-        // ponytail: newest three lockfiles only; make it a setting if one repo churns its lockfile daily.
-        let entries = ((try? fm.contentsOfDirectory(atPath: cacheDir)) ?? []).map { cacheDir + "/" + $0 }
-            .sorted { (mtime($0) ?? .distantPast) > (mtime($1) ?? .distantPast) }
-        for e in entries.dropFirst(3) { try? fm.removeItem(atPath: e); log("dropped cached node_modules \((e as NSString).lastPathComponent)") }
-        return true
     }
 
     // MARK: device use
@@ -762,7 +728,7 @@ enum Rules {
             let secrets = st.contains { l in l.hasPrefix("??") && unattendedKeep.contains { l.dropFirst(3).hasPrefix($0) } }
             let nm = w.path + "/node_modules"
             let nmIgnored = isDir(nm) && !ignored(["node_modules"], in: w.path).isEmpty
-            let cached = nmIgnored && seedNodeModules(w.path, apply: apply)
+            let cached = nmIgnored && DepCache.seed(w.path, apply: apply).contains { $0.hasPrefix("node-") }
             // Unattended removal also needs no untracked file git doesn't ignore, setup files included.
             let loose = st.contains { $0.hasPrefix("??") }
             if c.safe && !secrets && !loose {
@@ -946,7 +912,7 @@ enum Rules {
         let exists = Sh.git(["rev-parse", "--verify", "-q", "refs/heads/" + branch], in: repo).code == 0
         let r = Sh.git(["worktree", "add", path] + (exists ? [branch] : ["-b", branch] + a.dropFirst(2).prefix(1)), in: repo, timeout: 600)
         guard r.code == 0 else { say(r.err.trimmingCharacters(in: .whitespacesAndNewlines)); return r.code == 0 ? 1 : r.code }
-        ensureNodeModules(path)
+        for n in DepCache.prepare(path) { say("RigWatch: " + n) }
         print(path)
         return 0
     }
