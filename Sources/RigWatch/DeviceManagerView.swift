@@ -69,6 +69,13 @@ struct DeviceManagerView: View {
                 capReadout("Simulators", devs.filter { $0.kind == .simulator }.count, Rules.virtualCap("ios", s))
                 Spacer(minLength: 12)
                 VStack(alignment: .trailing, spacing: 6) {
+                    let idle = m.idleDevices
+                    if !idle.isEmpty {
+                        Button { m.confirmShutDownIdle() } label: {
+                            Label("Shut down \(idle.count) idle · \(Fmt.bytes(idle.reduce(UInt64(0)) { $0 + $1.mem }))", systemImage: "power")
+                        }.buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E), filled: true))
+                        .help("Every emulator and simulator nobody holds or uses that has been idle 10 minutes or more.")
+                    }
                     Chip(text: registered ? "DEVICE MANAGER ON" : "DEVICE MANAGER OFF", icon: "key", color: registered ? Color(hex: 0x3DDC97) : Aspect.process.color, filled: registered)
                     Text(registered ? "Registered with Claude Code: new sessions see the rigwatch tools" : "Not registered: turn the rules on (Rules page) so agents can ask for devices")
                         .hudLabel().multilineTextAlignment(.trailing)
@@ -96,7 +103,11 @@ struct DeviceManagerView: View {
                         Text("session \(c.session) · \(Views.tilde(c.workspace)) · since \(Fmt.ago(c.since))")
                             .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
-                    Text("agent-device keeps it for that session; RigWatch does not hand it out. Shut Down on its card ends the hold.").hudLabel()
+                    HStack(spacing: 10) {
+                        Text("agent-device keeps it for that session; RigWatch doesn't hand it out.").hudLabel()
+                        Button("Release") { m.confirmReleaseHold(d) }.buttonStyle(HUDButton(color: Color(hex: 0xFFD23F)))
+                            .help("End agent-device's hold but keep the device running. Shut down ends the hold and stops it.")
+                    }
                 } else {
                     HStack(spacing: 6) {
                         Chip(text: "FREE", icon: "checkmark.circle", color: Color(hex: 0x3DDC97)).fixedSize()
@@ -111,6 +122,16 @@ struct DeviceManagerView: View {
                     Text(Fmt.cpu(d.cpu)).font(.system(size: 11, design: .monospaced))
                     Text(Fmt.bytes(d.mem)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
                 }.fixedSize()
+                VStack(alignment: .trailing, spacing: 5) {
+                    if let idle = m.idleFor(d) {
+                        Text("idle \(BuildsView.span(idle))").hudLabel(idle >= Monitor.idleShutDownAfter ? Color(hex: 0xFFD23F).readable(scheme) : nil).fixedSize()
+                    } else {
+                        Text(d.lease != nil || d.claim != nil ? "held" : "used by a working session").hudLabel().fixedSize()
+                    }
+                    Button { m.confirmShutDown(d) } label: { Label("Shut down", systemImage: "power") }
+                        .buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E)))
+                        .help("Asks it to quit and frees its memory; forces it if it doesn't respond. The confirmation says who is using it.")
+                }.frame(width: 120, alignment: .trailing)
             }
         }
     }

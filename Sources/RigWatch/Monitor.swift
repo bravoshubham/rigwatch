@@ -368,7 +368,7 @@ final class Monitor: ObservableObject {
     struct ActionOutcome: Equatable { let id = UUID(); let title: String; let text: String; let failed: Bool }
 
     /// Results are plain sentences; these words mark the ones where the action did not happen.
-    static func looksFailed(_ msg: String) -> Bool {
+    nonisolated static func looksFailed(_ msg: String) -> Bool {
         let m = msg.lowercased()
         return ["could not", "failed", "refused", "not allowed", "still running", "error", "no longer running"].contains { m.contains($0) }
     }
@@ -527,7 +527,7 @@ final class Monitor: ObservableObject {
         if let c = d.claim {
             msg += "\n\nHeld by agent-device for session \"\(c.session)\" (\(Views.tilde(c.workspace))) since \(Fmt.ago(c.since)). agent-device boots it again if it is only shut down, so this ends that session with `agent-device close --session \(c.session) --shutdown`. The agent using it loses the device until it claims one again."
         } else {
-    msg += d.kind == .simulator ? "\n\nRuns `simctl shutdown`." : "\n\nAsks the emulator to quit through its console (adb emu kill). SIGTERM only if it does not answer in 15 s."
+    msg += d.kind == .simulator ? "\n\nRuns `simctl shutdown`, and force-stops the simulator if that fails." : "\n\nAsks the emulator to quit through its console (adb emu kill), which saves its quick-boot snapshot. If it is still running after a minute: SIGTERM, then a force stop (SIGKILL)."
         }
         if let l = d.lease {
             msg += "\n\n⚠️ Leased to \(sessionLabel(l.session)) until \(Leases.time(l.until))\(l.purpose.isEmpty ? "" : " for \"\(l.purpose)\"") through RigWatch's device manager. Shutting it down ends the lease; that session gets an error the next time it uses the device."
@@ -540,14 +540,51 @@ final class Monitor: ObservableObject {
             case .pending, .delivered: msg += "\n\n\(who) has not answered whether it is safe yet (asked \(Fmt.ago(a.askedAt)))."
             }
         }
-        let claim = d.claim
-        pending = Pending(title: "Shut down \(d.name)?", message: msg, button: "Shut Down") {
-            let r = claim.map { AgentDevice.release($0, deviceName: d.name) } ?? DeviceSampler.shutDown(d)
-            if !Self.looksFailed(r) {   // a stale answer or lease must not carry over to its next boot
-                Asks.forget(device: d.id)
-                Leases.edit { $0.removeAll { $0.covers(d) } }
-            }
-            return r
+        pending = Pending(title: "Shut down \(d.name)?", message: msg, button: "Shut Down") { Self.shutDownNow(d) }
+    }
+
+    /// Ends an agent-device hold (or shuts down directly), then forgets the device's lease and open question.
+    nonisolated static func shutDownNow(_ d: Device) -> String {
+        let r = d.claim.map { AgentDevice.release($0, deviceName: d.name) } ?? DeviceSampler.shutDown(d)
+        if !looksFailed(r) {   // a stale answer or lease must not carry over to its next boot
+            Asks.forget(device: d.id)
+            Leases.edit { $0.removeAll { $0.covers(d) } }
+        }
+        return r
+    }
+
+    /// Ends agent-device's hold on a device but leaves it running, so the device manager can hand it out.
+    func confirmReleaseHold(_ d: Device) {
+        guard let c = d.claim else { return }
+        let msg = "agent-device holds \(d.name) for its session \"\(c.session)\" (\(Views.tilde(c.workspace))) since \(Fmt.ago(c.since)).\n\nReleasing ends that agent-device session with `agent-device close --session \(c.session)`: the agent using it loses its hold (and any app session agent-device had open there) and gets an error on its next agent-device command. The device keeps running and becomes free for other sessions."
+        pending = Pending(title: "Release \(d.name)?", message: msg, button: "Release") { AgentDevice.release(c, deviceName: d.name, shutDown: false) }
+    }
+
+    /// How long nothing has used a device, or nil while something does: a lease (or in-use mark), an
+    /// agent-device hold, or an agent session working with it right now.
+    func idleFor(_ d: Device) -> TimeInterval? {
+        guard d.kind != .phone, d.lease == nil, d.claim == nil else { return nil }
+        let users = ([d.launchedBy].compactMap { $0 } + Array(d.recentUsers.keys)).compactMap { session($0) }
+        if users.contains(where: \.isWorking) { return nil }
+        let last = ([Demo.on ? nil : Rules.touched(d.id), d.lastAction?.at, d.started] + Array(d.recentUsers.values)).compactMap { $0 }.max()
+        return last.map { max(0, Date().timeIntervalSince($0)) }
+    }
+
+    static let idleShutDownAfter: TimeInterval = 600
+
+    /// Every emulator and simulator nobody holds or uses that has been idle at least 10 minutes.
+    var idleDevices: [Device] { devices.filter { (idleFor($0) ?? 0) >= Self.idleShutDownAfter }.sorted { $0.mem > $1.mem } }
+
+    func confirmShutDownIdle() {
+        let list = idleDevices
+        guard !list.isEmpty else { toast = "No emulator or simulator has been idle for 10 minutes."; return }
+        let total = list.reduce(UInt64(0)) { $0 + $1.mem }
+        var msg = list.map { "• \($0.name) · \(Fmt.bytes($0.mem)) · idle \(Fmt.ago(Date().addingTimeInterval(-(idleFor($0) ?? 0))).replacingOccurrences(of: " ago", with: ""))" }.joined(separator: "\n")
+        msg += "\n\nFrees about \(Fmt.bytes(total)). None is leased, in use, held by agent-device or used by a working agent session. Each is asked to quit first and forced only if it doesn't."
+        pending = Pending(title: "Shut down \(list.count) idle device\(list.count == 1 ? "" : "s")?", message: msg, button: "Shut Down All") {
+            let results = list.map { Self.shutDownNow($0) }
+            let failed = results.filter(Self.looksFailed)
+            return failed.isEmpty ? "Shut down \(list.count) idle device\(list.count == 1 ? "" : "s"), about \(Fmt.bytes(total)) freed." : results.joined(separator: "\n")
         }
     }
 

@@ -206,10 +206,16 @@ final class DeviceSampler {
     }
 
     /// Graceful shutdown: emulator console `kill` / `simctl shutdown`, then SIGTERM if it is still up.
+    /// Asks first, then forces: a device someone chose to shut down must actually stop and give its memory back.
     static func shutDown(_ d: Device) -> String {
         if d.kind == .simulator {
             let r = Sh.run("/usr/bin/xcrun", ["simctl", "shutdown", d.id], timeout: 60)
-            return r.code == 0 ? "Shut down \(d.name)." : "simctl shutdown failed: \(r.err.prefix(200))"
+            if r.code == 0 { return "Shut down \(d.name)." }
+            // simctl gave up (a hung simulator): stop its launchd_sim, which takes every process of that simulator with it.
+            guard let pid = d.pid, kill(pid, 0) == 0 else { return "simctl shutdown failed: \(r.err.prefix(200))" }
+            kill(pid, SIGKILL)
+            for _ in 0..<20 { if kill(pid, 0) != 0 { return "\(d.name) did not shut down normally (simctl: \(r.err.prefix(120).trimmingCharacters(in: .whitespacesAndNewlines))), so RigWatch force-stopped it." }; usleep(250_000) }
+            return "Could not stop \(d.name): simctl failed and its process (pid \(pid)) did not exit."
         }
         if let s = d.serial { _ = Sh.run(Sh.adb, ["-s", s, "emu", "kill"], timeout: 10) }
         guard let pid = d.pid else { return "Sent kill to \(d.name)." }
@@ -217,7 +223,9 @@ final class DeviceSampler {
         for _ in 0..<120 { if kill(pid, 0) != 0 { return "Shut down \(d.name)." }; usleep(500_000) }
         kill(pid, SIGTERM)
         for _ in 0..<20 { if kill(pid, 0) != 0 { return "\(d.name) did not answer the console; stopped it with SIGTERM." }; usleep(500_000) }
-        return "\(d.name) is still running after SIGTERM (pid \(pid)). Use Force Quit in Processes if you are sure."
+        kill(pid, SIGKILL)
+        for _ in 0..<20 { if kill(pid, 0) != 0 { return "\(d.name) ignored the console and SIGTERM, so RigWatch force-stopped it (its quick-boot snapshot was not saved)." }; usleep(250_000) }
+        return "Could not stop \(d.name) (pid \(pid)): it is still running after SIGKILL."
     }
 }
 

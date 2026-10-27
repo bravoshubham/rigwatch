@@ -701,7 +701,8 @@ struct DeviceCard: View {
                             Chip(text: "HELD BY AGENT-DEVICE", icon: "lock.fill", color: Color(hex: 0xFFD23F)).fixedSize()
                             Text("session \(c.session) · \(Views.tilde(c.workspace)) · since \(Fmt.ago(c.since))")
                                 .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                        }.help("agent-device boots this device again while that session holds it. Shut Down ends the session's claim so it stays off.")
+                            Button("Release") { m.confirmReleaseHold(d) }.buttonStyle(HUDButton(color: Color(hex: 0xFFD23F))).fixedSize()
+                        }.help("agent-device boots this device again while that session holds it. Release ends the hold and keeps it running; Shut Down ends the hold and stops it.")
                     }
                     if let l = d.launchedBy { sessionRow("Launched by", l) }
                     ForEach(d.recentUsers.sorted { $0.value > $1.value }.prefix(3), id: \.key) { u in sessionRow("Used by", u.key, when: u.value) }

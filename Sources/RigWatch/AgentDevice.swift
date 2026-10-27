@@ -42,13 +42,19 @@ enum AgentDevice {
         return out
     }
 
-    /// Ends the agent-device session that holds the device and shuts the device down with it.
-    static func release(_ c: Claim, deviceName: String) -> String {
-        guard let cli else { return "Could not release \(deviceName): agent-device holds it but its command was not found, so it would boot it again." }
-        let r = Sh.run(cli, ["close", "--session", c.session, "--shutdown"], timeout: 120)
+    /// Ends the agent-device session that holds the device, and shuts the device down with it unless told not to.
+    static func release(_ c: Claim, deviceName: String, shutDown: Bool = true) -> String {
+        guard let cli else { return "Could not release \(deviceName): agent-device holds it but its command was not found\(shutDown ? ", so it would boot it again" : "")." }
+        let r = Sh.run(cli, ["close", "--session", c.session] + (shutDown ? ["--shutdown"] : []), timeout: 120)
         guard r.code == 0 else {
             let why = (r.err.isEmpty ? r.out : r.err).trimmingCharacters(in: .whitespacesAndNewlines).prefix(240)
             return "agent-device close failed for session \(c.session) (exit \(r.code)): \(why)"
+        }
+        if !shutDown {
+            // Confirm the hold is really gone rather than trusting the exit code.
+            cache = (.distantPast, .distantPast, [:])
+            return claims().values.contains { $0.session == c.session } ? "agent-device still lists a hold for session \(c.session) on \(deviceName); it was not released."
+                : "Released \(deviceName) from agent-device session \(c.session). It keeps running and is free for other sessions."
         }
         return "Ended agent-device session \(c.session) and shut down \(deviceName); it stays off until an agent claims it again."
     }
