@@ -9,11 +9,14 @@ enum AgentDevice {
         let session: String        // agent-device's session name
         let workspace: String      // the folder the agent works in
         let since: Date
+        var stateDir: String? = nil   // the agent-device home of the daemon that owns the session (AGENT_DEVICE_STATE_DIR)
     }
 
     /// RIGWATCH_AGENT_DEVICE_DIR stands in for ~/.agent-device (used to test without the tool installed).
     static let dir = ProcessInfo.processInfo.environment["RIGWATCH_AGENT_DEVICE_DIR"] ?? Sh.home + "/.agent-device"
-    static let cli = ["/opt/homebrew/bin/agent-device", "/usr/local/bin/agent-device"].first { FileManager.default.isExecutableFile(atPath: $0) }
+    /// RIGWATCH_AGENT_DEVICE_CLI stands in for the agent-device command (used to test without the tool installed).
+    static let cli = ([ProcessInfo.processInfo.environment["RIGWATCH_AGENT_DEVICE_CLI"]].compactMap { $0 } + ["/opt/homebrew/bin/agent-device", "/usr/local/bin/agent-device"])
+        .first { FileManager.default.isExecutableFile(atPath: $0) }
 
     private static var cache: (stamp: Date, at: Date, claims: [String: Claim]) = (.distantPast, .distantPast, [:])
     private static let lock = NSLock()
@@ -36,7 +39,9 @@ enum AgentDevice {
             let ms = (j["createdAtMs"] as? NSNumber)?.doubleValue
             let since = ms.map { Date(timeIntervalSince1970: $0 / 1000) }
                 ?? ((try? fm.attributesOfItem(atPath: folder + "/" + f))?[.modificationDate] as? Date) ?? Date()
-            out[id] = Claim(session: session, workspace: j["workspace"] as? String ?? "", since: since)
+            // stateDir is <home>/sessions/<name>: several agent-device daemons, each with its own home, share the claims folder.
+            let home = (j["stateDir"] as? String).flatMap { dir in dir.range(of: "/sessions/").map { String(dir[..<$0.lowerBound]) } }
+            out[id] = Claim(session: session, workspace: j["workspace"] as? String ?? "", since: since, stateDir: home)
         }
         cache = (stamp, Date(), out)
         return out
@@ -45,7 +50,11 @@ enum AgentDevice {
     /// Ends the agent-device session that holds the device, and shuts the device down with it unless told not to.
     static func release(_ c: Claim, deviceName: String, shutDown: Bool = true) -> String {
         guard let cli else { return "Could not release \(deviceName): agent-device holds it but its command was not found\(shutDown ? ", so it would boot it again" : "")." }
-        let r = Sh.run(cli, ["close", "--session", c.session] + (shutDown ? ["--shutdown"] : []), timeout: 120)
+        // Ask the daemon that owns the session, from the session's workspace: agent-device keeps sessions per home and per workspace.
+        let fm = FileManager.default
+        let r = Sh.run(cli, ["close", "--session", c.session] + (shutDown ? ["--shutdown"] : []),
+                       cwd: fm.fileExists(atPath: c.workspace) ? c.workspace : nil,
+                       env: c.stateDir.map { ["AGENT_DEVICE_STATE_DIR": $0] } ?? [:], timeout: 120)
         guard r.code == 0 else {
             let why = (r.err.isEmpty ? r.out : r.err).trimmingCharacters(in: .whitespacesAndNewlines).prefix(240)
             return "agent-device close failed for session \(c.session) (exit \(r.code)): \(why)"

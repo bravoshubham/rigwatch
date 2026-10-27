@@ -545,7 +545,11 @@ final class Monitor: ObservableObject {
 
     /// Ends an agent-device hold (or shuts down directly), then forgets the device's lease and open question.
     nonisolated static func shutDownNow(_ d: Device) -> String {
-        let r = d.claim.map { AgentDevice.release($0, deviceName: d.name) } ?? DeviceSampler.shutDown(d)
+        var r = d.claim.map { AgentDevice.release($0, deviceName: d.name) } ?? DeviceSampler.shutDown(d)
+        // The hold outlived its agent-device session: nothing will boot the device again, so shut it down directly.
+        if let c = d.claim, r.contains("SESSION_NOT_FOUND") {
+            r = "agent-device no longer has session \(c.session) (its hold was stale). " + DeviceSampler.shutDown(d)
+        }
         if !looksFailed(r) {   // a stale answer or lease must not carry over to its next boot
             Asks.forget(device: d.id)
             Leases.edit { $0.removeAll { $0.covers(d) } }

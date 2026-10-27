@@ -19,11 +19,11 @@ enum Sh {
     struct Result { let code: Int32; let data: Data; let err: String
         var out: String { String(decoding: data, as: UTF8.self) } }
 
-    static func run(_ exe: String, _ args: [String], cwd: String? = nil, timeout: Double = 15) -> Result {
+    static func run(_ exe: String, _ args: [String], cwd: String? = nil, env extra: [String: String] = [:], timeout: Double = 15) -> Result {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe.hasPrefix("/") ? exe : "/usr/bin/env")
         p.arguments = exe.hasPrefix("/") ? args : [exe] + args
-        p.environment = env
+        p.environment = env.merging(extra) { _, new in new }
         if let cwd { p.currentDirectoryURL = URL(fileURLWithPath: cwd) }
         let o = Pipe(), e = Pipe()
         p.standardOutput = o; p.standardError = e; p.standardInput = FileHandle.nullDevice

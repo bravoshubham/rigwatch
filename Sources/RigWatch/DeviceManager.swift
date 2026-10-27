@@ -83,7 +83,7 @@ enum DeviceManager {
             let now = list
             let taken = { (d: Device) in now.contains { $0.covers(d) && $0.session != me } || (d.claim != nil) }
             let mine = devs.filter { d in self.platform(of: d) == platform && now.contains { $0.covers(d) && $0.session == me } && matches(d) }
-            if let d = mine.first, let i = list.firstIndex(where: { $0.covers(d) }) {
+            if let d = mine.first, let i = list.firstIndex(where: { $0.covers(d) && $0.session == me }) {
                 list[i].until = max(list[i].until, until); if !purpose.isEmpty { list[i].purpose = purpose }
                 if list[i].isImplicit {   // it was using the device already: now it holds it properly
                     list[i].implicit = nil; list[i].ownerPid = opid; list[i].ownerStart = ostart; list[i].name = d.name
@@ -138,7 +138,11 @@ enum DeviceManager {
         case .bootAVD(let avd):
             do {
                 let serial = try bootEmulator(avd, headless: headless)
-                Leases.edit { list in if let i = list.firstIndex(where: { $0.device == "avd:" + avd && $0.session == me }) { list[i].device = serial } }
+                Leases.edit { list in
+                    if let i = list.firstIndex(where: { $0.device == "avd:" + avd && $0.session == me }) { list[i].device = serial }
+                    // The serial is new to this boot: an in-use mark another session left on it is about a device that is gone.
+                    list.removeAll { $0.device == serial && $0.session != me && $0.isImplicit }
+                }
                 Rules.log("lease: booted \(avd) (\(serial)) for session \(me) until \(Leases.time(until))")
                 return granted(serial, avd, platform, until, booted: true, note: nil)
             } catch { Leases.edit { $0.removeAll { $0.device == "avd:" + avd && $0.session == me } }; throw error }
