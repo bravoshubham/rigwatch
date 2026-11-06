@@ -52,6 +52,8 @@ final class Monitor: ObservableObject {
     @Published var agentOwner: [Int32: String] = [:]   // pid -> session id, for agents other than Claude Code
     @Published var top: TopKind?                         // the Top CPU / Top memory sheet, when open
     @Published var asks: [Ask] = []                      // open "is it safe to shut down?" questions (asks.json)
+    @Published var peerRows: [PeerRow] = []              // other Macs this Mac's agents may use, and how they are
+    private var peersAt = Date.distantPast
     @Published var leases: [Lease] = []                  // devices lent to agent sessions (leases.json)
     @Published var jobs: [BuildJob] = []                 // builds holding or waiting for a slot (jobs.json)
     @Published var outside: [Rules.OutsideBuild] = []    // builds running outside the queue
@@ -640,6 +642,57 @@ final class Monitor: ObservableObject {
         var cpu = 0.0, stack = [pid]
         while let x = stack.popLast() { cpu += procIndex[x]?.cpu ?? 0; stack += kids[x] ?? [] }
         return cpu
+    }
+
+    // MARK: other Macs
+
+    struct PeerRow: Identifiable, Equatable { let host: String; var allowed: Bool; var status: Peers.Status?; var id: String { host } }
+    private final class Rows: @unchecked Sendable { var rows: [PeerRow] = []; let lock = NSLock() }
+
+    /// Finds the Macs this one could use and asks each how it is (SSH, a few seconds), at most once a minute.
+    func loadPeers(force: Bool = false) {
+        guard !Demo.on, force || Date().timeIntervalSince(peersAt) > 60 else { return }
+        peersAt = Date()
+        let known = peerRows
+        DispatchQueue.global(qos: .utility).async {
+            let saved = Peers.load(), box = Rows()
+            box.rows = Peers.candidates().map { h in PeerRow(host: h, allowed: saved.first { $0.host == h }?.allowed ?? false, status: known.first { $0.host == h }?.status) }
+            DispatchQueue.main.async { self.peerRows = box.rows }
+            let g = DispatchGroup()
+            for i in box.rows.indices {
+                g.enter()
+                DispatchQueue.global(qos: .utility).async {
+                    let st = Peers.probe(box.rows[i].host)
+                    box.lock.lock(); box.rows[i].status = st; box.lock.unlock(); g.leave()
+                }
+            }
+            g.wait()
+            DispatchQueue.main.async { self.peerRows = box.rows }
+        }
+    }
+
+    func confirmAllowPeer(_ r: PeerRow, _ on: Bool) {
+        guard on else {
+            Peers.setAllowed(r.host, false); loadPeers(force: true)
+            outcome = ActionOutcome(title: "Disallow \(r.host)", text: "Agents here won't be given devices on \(r.host) any more. Devices in use there are handed back as their leases end.", failed: false)
+            return
+        }
+        let name: String = { if case .online(let i) = r.status { return i.name }; return r.host }()
+        var msg = "Agents on this Mac may then be given emulators on \(name): RigWatch takes a free one or boots one there, and tunnels its adb port here over SSH. The apps the agents build here, company code included, are installed and run on \(name).\n\nAllow only a Mac that may hold that work."
+        msg += "\n\n\(name) must also share its emulators (Device Manager page there). Disallow any time."
+        pending = Pending(title: "Allow \(r.host)?", message: msg, button: "Allow") {
+            Peers.setAllowed(r.host, true)
+            DispatchQueue.main.async { self.loadPeers(force: true) }
+            return "Agents here may now be given emulators on \(r.host) when it shares them."
+        }
+    }
+
+    func setShareDevices(_ on: Bool) {
+        let save = { (v: Bool) in var s = RuleSettings.load(); s.shareDevices = v; s.save() }
+        guard on else { save(false); outcome = ActionOutcome(title: "Stop sharing", text: "Other Macs can't take new devices here. Ones in use stay until their sessions hang up.", failed: false); return }
+        pending = Pending(title: "Share this Mac's emulators?", message: "Agents on other Macs that allow this one may then take a free emulator here or boot one, and install and run their apps on it. They reach it over SSH, so they need SSH access to this Mac already.\n\nThe limits on the Rules page still apply here.", button: "Share") {
+            save(true); return "Other Macs that allow this one can now use its emulators."
+        }
     }
 
     // MARK: device manager

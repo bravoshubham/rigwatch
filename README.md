@@ -107,6 +107,14 @@ at once, desktop app and terminal alike:
   `prepare_worktree`; the install then only checks, instead of downloading gigabytes again. Each
   successful install refills the store. Only into folders git ignores. A build alone on the Mac gets
   more threads than the minimum set on the Rules page, up to all cores but two.
+- **Use other Macs.** RigWatch on another Mac can lend this one its devices, to spread the load: an
+  Android emulator there is reached through an SSH tunnel and shows up here as an ordinary adb device
+  (`acquire_device` picks it when nothing is free here, or with `where: "remote"`), and an iOS build
+  or test runs there on its own simulator with the MCP tool `run_on_mac`, which copies the worktree
+  over (only changes after the first time) and brings result files back. A Mac is used only when it
+  is allowed here and shares its devices there, both on the Device Manager page, which lists the
+  Macs found in `~/.ssh/config` and on Tailscale with their load and devices. Leases end with the
+  session that took them, and an emulator booted there is shut down again.
 - **Physical devices first.** Booting an emulator or simulator is refused while a phone of that kind
   is connected or another virtual one is already running. `RIGWATCH_VIRTUAL=1` in front of the command
   lets it through.

@@ -15,6 +15,7 @@ struct Lease: Codable, Equatable {
     var since: Date
     var until: Date
     var booted = false             // RigWatch booted it for this lease, so releasing it shuts it down
+    var remote: String?            // the Mac the device runs on, when it is another Mac's emulator reached through an SSH tunnel
     var implicit: Bool?            // taken by a session using the device directly (adb -s, simctl, a device tool), not through acquire_device
 
     var isImplicit: Bool { implicit == true }

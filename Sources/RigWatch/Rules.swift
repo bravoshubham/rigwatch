@@ -13,6 +13,8 @@ struct RuleSettings: Codable, Equatable {
     var lowerOutside = true      // builds outside the queue, and Gradle's daemons, run at lower priority
     var buildThreads = max(2, ProcessInfo.processInfo.activeProcessorCount / 3)
     var physicalFirst = true
+    var shareDevices = false     // other Macs' agents may use this Mac's emulators (they must also be allowed there)
+    var preferPeers = true       // a new emulator starts on an allowed Mac that shares, before one boots here
     var limitVirtual = true      // at most this many emulators and simulators running at once
     var maxEmulators = 2
     var maxSimulators = 2
@@ -254,7 +256,8 @@ enum Rules {
     static func devices(_ plat: String, procs: [Proc]? = nil) -> (phys: [String], virt: [Device]) {
         let ds = DeviceSampler().sample(procs: procs ?? ProcSampler().sample(), deep: false)
         if plat == "ios" { return (iPhones(), ds.filter { $0.kind == .simulator }) }
-        return (ds.filter { $0.kind == .phone && $0.state == "device" }.map(\.name), ds.filter { $0.kind == .emulator })
+        // A serial with a port is another Mac's emulator reached over the network, not a phone on this desk.
+        return (ds.filter { $0.kind == .phone && $0.state == "device" && !$0.id.contains(":") }.map(\.name), ds.filter { $0.kind == .emulator })
     }
 
     /// Connected iPhones and iPads, from devicectl (Xcode 15 and later).
@@ -947,10 +950,11 @@ enum CLI {
     RigWatch answer ID yes|no [REASON]  answer RigWatch's question whether a device you use can be shut down
     RigWatch status                     what is running, queued and booted
     RigWatch mcp                        MCP server: agents acquire and release emulators, simulators and phones
+    RigWatch peer info|hold|run         what another Mac's RigWatch uses to borrow this Mac's devices (over SSH)
     RigWatch version                    the version of this RigWatch
     RigWatch install|uninstall          turn the rules on or off (Claude Code hook, MCP device manager, clean-up agent)
     """
-    static let commands: Set = ["run", "hook", "mcp", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version"]
+    static let commands: Set = ["run", "hook", "mcp", "peer", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version"]
 
     static func main(_ args: [String]) -> Int32? {
         guard let c = args.first, commands.contains(c) else { return nil }
@@ -959,6 +963,7 @@ enum CLI {
         case "run": return Rules.run(a)
         case "hook": Rules.hook()   // nothing printed = the tool call goes ahead unchanged
         case "mcp": return MCPServer.main()
+        case "peer": return Peers.main(a)
         case "reap": let r = Rules.reap(apply: a.contains("--apply")); Rules.saveReport(r); print(r.text)
         case "wt": return Rules.newWorktree(a)
         case "pin", "unpin":

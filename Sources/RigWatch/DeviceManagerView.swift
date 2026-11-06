@@ -37,12 +37,13 @@ struct DeviceManagerView: View {
                         VStack(alignment: .leading, spacing: 10) { ForEach(booting, id: \.device) { lease($0, kind: "BOOTING") } }
                     }
                 }
+                peersSection
                 bootableSection
                 Text("Agents get devices with the rigwatch MCP tools: acquire_device leases a free phone, then a free running emulator or simulator, and boots one only when none is free. A lease keeps other sessions off the device and the clean-up away from it; commands that name the device renew it, and it ends when the session releases it, lets it run out, or exits.")
                     .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
             }.padding(20)
         }
-        .onAppear { registered = Demo.on || Rules.mcpInstalled(); m.loadBootable(force: m.bootable == nil) }
+        .onAppear { m.loadPeers(force: true); registered = Demo.on || Rules.mcpInstalled(); m.loadBootable(force: m.bootable == nil) }
         .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { _ in m.loadBootable() }
     }
 
@@ -93,7 +94,7 @@ struct DeviceManagerView: View {
                 .font(.system(size: 15)).foregroundStyle(a.color.readable(scheme)).frame(width: 20).padding(.top, 2)
             VStack(alignment: .leading, spacing: 3) {
                 Text(d.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                Text([d.kind.rawValue, d.id.count > 20 ? String(d.id.prefix(8)) + "…" : d.id].joined(separator: " · ")).hudLabel().lineLimit(1).help(d.id)
+                Text([d.lease?.remote.map { "Android emulator on \($0)" } ?? d.kind.rawValue, d.id.count > 20 ? String(d.id.prefix(8)) + "…" : d.id].joined(separator: " · ")).hudLabel().lineLimit(1).help(d.id)
             }.frame(width: 200, alignment: .leading)
             VStack(alignment: .leading, spacing: 6) {
                 if let l = d.lease { lease(l, kind: nil) }
@@ -171,6 +172,60 @@ struct DeviceManagerView: View {
             Spacer(minLength: 6)
             Button("Extend 30 min") { m.extendLease(l) }.buttonStyle(HUDButton(color: Color(hex: 0x3DDC97)))
             Button("End lease") { m.confirmEndLease(l) }.buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E)))
+        }
+    }
+
+    // MARK: other Macs
+
+    @ViewBuilder var peersSection: some View {
+        let s = Demo.on ? RuleSettings() : RuleSettings.load()
+        SectionTitle(title: "Other Macs", aspect: .android, count: m.peerRows.count)
+        Panel(aspect: .android, padding: 12) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 18) {
+                    Toggle(isOn: Binding(get: { s.shareDevices }, set: { m.setShareDevices($0) })) { Text("Share this Mac's emulators with other Macs").font(.system(size: 11.5)) }
+                        .toggleStyle(.checkbox)
+                    Toggle(isOn: Binding(get: { s.preferPeers }, set: { v in var x = RuleSettings.load(); x.preferPeers = v; x.save() })) {
+                        Text("Use allowed Macs before booting an emulator here").font(.system(size: 11.5))
+                    }.toggleStyle(.checkbox)
+                    Spacer()
+                    Button("Refresh") { m.loadPeers(force: true) }.buttonStyle(HUDButton(color: Aspect.process.color))
+                }
+                if m.peerRows.isEmpty { Text("No other Mac found in ~/.ssh/config or on Tailscale.").hudLabel() }
+                ForEach(m.peerRows) { r in peerRow(r) }
+                Text("A Mac is used only when it is allowed here and shares its devices there. Android emulators there are reached through an SSH tunnel (acquire_device); iOS builds and tests run there on its own simulators (run_on_mac).").hudLabel()
+            }
+        }
+    }
+
+    func peerRow(_ r: Monitor.PeerRow) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "laptopcomputer").font(.system(size: 14)).foregroundStyle(r.allowed ? Color(hex: 0x3DDC97) : Color.secondary).frame(width: 20)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(r.host).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+                Text(peerStatus(r.status)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            if case .online(let i) = r.status {
+                Chip(text: i.sharing ? "SHARING" : "NOT SHARING", color: i.sharing ? Color(hex: 0x3DDC97) : Aspect.process.color).fixedSize()
+            }
+            if r.allowed {
+                Chip(text: "ALLOWED", icon: "checkmark", color: Color(hex: 0x3DDC97), filled: true).fixedSize()
+                Button("Disallow") { m.confirmAllowPeer(r, false) }.buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E)))
+            } else {
+                Button("Allow") { m.confirmAllowPeer(r, true) }.buttonStyle(HUDButton(color: Color(hex: 0x3DDC97)))
+            }
+        }
+    }
+
+    func peerStatus(_ st: Peers.Status?) -> String {
+        switch st {
+        case nil: return "checking…"
+        case .noRigWatch: return "reachable over SSH; RigWatch there is missing or older than 1.9"
+        case .unreachable(let why): return "not reachable: \(why)"
+        case .online(let i):
+            let free = i.emulators.filter(\.free).count
+            return "\(i.name) · RigWatch \(i.version) · \(i.cores) cores · \(Int(i.memGB.rounded())) GB · \(Views.pressureName(i.pressure).lowercased()) pressure · load \(String(format: "%.0f", i.load)) · emulators \(free) free of \(i.emulators.count) · \(i.avds.count) AVDs\(i.xcode ? " · Xcode" : "")"
         }
     }
 

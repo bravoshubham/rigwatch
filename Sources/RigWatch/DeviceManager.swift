@@ -69,8 +69,14 @@ enum DeviceManager {
         return out
     }
 
-    static func acquire(platform: String, want: String?, minutes: Int, purpose: String, headless: Bool) throws -> [String: Any] {
+    /// `where`: "local" only this Mac, "remote" only another allowed Mac, "auto" (default) a free device here first, then
+    /// another Mac before booting one here when the Rules prefer that, or when this Mac is at its limit or under pressure.
+    static func acquire(platform: String, want: String?, minutes: Int, purpose: String, headless: Bool, virtualOnly: Bool = false, where place: String = "auto") throws -> [String: Any] {
         guard platform == "android" || platform == "ios" else { throw Failure(message: "platform must be android or ios") }
+        if place == "remote" {
+            guard platform == "android" else { throw Failure(message: "Only Android emulators can be used on another Mac; for iOS, build and test there with run_on_mac.") }
+            return try remote(want: want, minutes: minutes, purpose: purpose)
+        }
         let me = session, (opid, ostart) = owner, mins = min(max(minutes, 1), Leases.maxMinutes)
         let until = Date().addingTimeInterval(TimeInterval(mins * 60))
         let s = RuleSettings.load()
@@ -92,7 +98,7 @@ enum DeviceManager {
             }
             let free = devs.filter { self.platform(of: $0) == platform && !taken($0) && matches($0) }
             // A connected phone first (the Rules' "physical devices first"), then a running virtual device.
-            let phone = free.first { $0.kind == .phone }, virt = free.first { $0.kind != .phone }
+            let phone = virtualOnly ? nil : free.first { $0.kind == .phone && !$0.id.contains(":") }, virt = free.first { $0.kind != .phone }
             let d = want != nil ? free.first : (s.physicalFirst ? phone ?? virt : virt ?? phone)
             if let d {
                 list.append(Lease(device: d.id, name: d.name, platform: platform, physical: d.kind == .phone, session: me, ownerPid: opid, ownerStart: ostart,
@@ -129,7 +135,23 @@ enum DeviceManager {
             return .success(.bootSim(sim))
         }
 
-        switch try pick.get() {
+        let picked: Pick
+        switch pick {
+        case .success(let p): picked = p
+        case .failure(let f):
+            // Full or under pressure here: another Mac may still have room.
+            if platform == "android", place == "auto", !virtualOnly, Peers.load().contains(where: \.allowed) {
+                do { return try remote(want: want, minutes: minutes, purpose: purpose) }
+                catch let r as Failure { throw Failure(message: f.message + " Other Macs: " + r.message) }
+            }
+            throw f
+        }
+        if case .bootAVD(let avd) = picked, place == "auto", !virtualOnly, s.preferPeers, Peers.load().contains(where: \.allowed),
+           let r = try? remote(want: want, minutes: minutes, purpose: purpose) {
+            Leases.edit { $0.removeAll { $0.device == "avd:" + avd && $0.session == me } }
+            return r
+        }
+        switch picked {
         case .have(let d, let l): return granted(d.id, d.name, platform, l.until, booted: false, note: "You already held this device; the lease is extended.")
         case .take(let d):
             Rules.touch(d.id)
@@ -153,6 +175,18 @@ enum DeviceManager {
                 return granted(sim.udid, sim.name, platform, until, booted: true, note: nil)
             } catch { Leases.edit { $0.removeAll { $0.device == sim.udid && $0.session == me } }; throw error }
         }
+    }
+
+    /// An emulator on another allowed Mac, tunnelled here. Its lease is owned by this MCP server, which holds the tunnel.
+    static func remote(want: String?, minutes: Int, purpose: String) throws -> [String: Any] {
+        let me = session, pid = getpid(), mins = min(max(minutes, 1), Leases.maxMinutes)
+        let until = Date().addingTimeInterval(TimeInterval(mins * 60))
+        let r = try Peers.acquireRemote(want: want, minutes: mins, purpose: purpose, session: me)
+        Leases.edit { $0.append(Lease(device: r.id, name: r.name, platform: "android", session: me, ownerPid: pid, ownerStart: ProcSampler.startTime(pid) ?? 0,
+                                       purpose: purpose, since: Date(), until: until, booted: r.booted, remote: r.host)) }
+        Rules.log("lease: \(r.name) (\(r.id)) to session \(me) until \(Leases.time(until))\(purpose.isEmpty ? "" : ": " + purpose)")
+        return granted(r.id, r.name, "android", until, booted: r.booted,
+                       note: "Runs on \(r.host) to spare this Mac, reached through an SSH tunnel: use it like any adb device (adb -s \(r.id)). Installs go over the network, so they are a little slower.")
     }
 
     private static func granted(_ id: String, _ name: String, _ platform: String, _ until: Date, booted: Bool, note: String?) -> [String: Any] {
@@ -182,6 +216,10 @@ enum DeviceManager {
         }
         guard let l else { throw Failure(message: "You hold no lease on \(id).") }
         Rules.log("lease: session \(me) released \(l.name) (\(l.device))")
+        if let host = l.remote {
+            Peers.release(l.device)
+            return ["released": l.device, "shut_down": l.booted, "note": "Handed back to \(host)\(l.booted ? ", which shuts it down" : "; it keeps running there")."]
+        }
         let off = !l.physical && (shutdown ?? l.booted)
         guard off else { return ["released": l.device, "shut_down": false, "note": l.physical ? "A physical device stays connected." : "It keeps running for the next session that asks."] }
         guard let d = running().first(where: { $0.id == l.device }) else { return ["released": l.device, "shut_down": false, "note": "It was no longer running."] }
@@ -277,11 +315,18 @@ enum MCPServer {
               "name": ["type": "string", "description": "A specific AVD, simulator name, serial or UDID. Omit to take any free one."],
               "minutes": ["type": "integer", "minimum": 1, "maximum": Leases.maxMinutes, "description": "Lease length (default \(Leases.defaultMinutes)). Commands that name the device renew it."],
               "purpose": ["type": "string", "description": "What you need it for, shown to the user."],
-              "headless": ["type": "boolean", "description": "Boot an emulator without a window (default true)."]], required: ["platform"]),
+              "headless": ["type": "boolean", "description": "Boot an emulator without a window (default true)."],
+              "where": ["type": "string", "enum": ["auto", "local", "remote"], "description": "auto (default): a free device here first, then another allowed Mac before booting one here. local: only this Mac. remote: an emulator on another allowed Mac."]], required: ["platform"]),
         tool("renew_device", "Extend your lease on a device, for example before a long build.",
              ["id": ["type": "string"], "minutes": ["type": "integer", "minimum": 1, "maximum": Leases.maxMinutes]], required: ["id"]),
         tool("release_device", "Give a device back when you are done. A device RigWatch booted for you is shut down unless shutdown is false; one that was already running keeps running.",
              ["id": ["type": "string"], "shutdown": ["type": "boolean"]], required: ["id"]),
+        tool("run_on_mac", "Run a build or test on another allowed Mac to spare this one, typically an iOS xcodebuild with a simulator there. Copies the worktree over (only changes after the first time), leases a simulator on that Mac when simulator is true (use -destination id=$RIGWATCH_SIM_UDID), runs the command in that Mac's build queue, then copies the listed result files back. Blocks until it finishes.",
+             ["command": ["type": "string", "description": "Shell command to run in the worktree there, e.g. xcodebuild -workspace App.xcworkspace -scheme App -destination id=$RIGWATCH_SIM_UDID test"],
+              "path": ["type": "string", "description": "The worktree. Defaults to the current directory."],
+              "host": ["type": "string", "description": "A specific allowed Mac. Omit to use the least busy one."],
+              "simulator": ["type": "boolean", "description": "Lease a simulator there for the run (default: true when the command runs xcodebuild)."],
+              "artifacts": ["type": "array", "items": ["type": "string"], "description": "Paths inside the worktree to copy back, e.g. build/test.xcresult or screenshots."]], required: ["command"]),
         tool("prepare_worktree", "Prepare a new worktree before its first install or build: copies in node_modules, CocoaPods' Pods and Xcode's package and module caches from another worktree or RigWatch's store when they match this worktree's lockfiles (an APFS clone: seconds, no extra disk). The install afterwards only checks them. Builds and installs run through RigWatch do this on their own; call it to have it done up front.",
              ["path": ["type": "string", "description": "The worktree (or any folder in it). Defaults to the current directory."],
               "derived_data_path": ["type": "string", "description": "The -derivedDataPath your xcodebuild uses, if any, relative to the worktree."]], required: []),
@@ -301,6 +346,12 @@ enum MCPServer {
     """
 
     static func main() -> Int32 {
+        // Remote emulators whose lease ended (run out, ended from the app) are handed back.
+        let sweep = DispatchSource.makeTimerSource(queue: .global())
+        sweep.schedule(deadline: .now() + 60, repeating: 60)
+        sweep.setEventHandler { Peers.sweep() }
+        sweep.resume()
+        defer { sweep.cancel() }
         while let line = readLine(strippingNewline: true) {
             guard !line.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
             guard let msg = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any] else {
@@ -336,7 +387,7 @@ enum MCPServer {
             case "acquire_device":
                 guard let p = str("platform") else { throw DeviceManager.Failure(message: "platform is required (android or ios)") }
                 out = try DeviceManager.acquire(platform: p, want: str("name"), minutes: int("minutes") ?? Leases.defaultMinutes,
-                                                purpose: str("purpose") ?? "", headless: a["headless"] as? Bool ?? true)
+                                                purpose: str("purpose") ?? "", headless: a["headless"] as? Bool ?? true, where: str("where") ?? "auto")
             case "renew_device":
                 guard let id = str("id") else { throw DeviceManager.Failure(message: "id is required") }
                 out = try DeviceManager.renew(id, minutes: int("minutes") ?? Leases.defaultMinutes)
@@ -344,6 +395,12 @@ enum MCPServer {
                 guard let id = str("id") else { throw DeviceManager.Failure(message: "id is required") }
                 out = try DeviceManager.release(id, shutdown: a["shutdown"] as? Bool)
             case "build_queue": out = Rules.status()
+            case "run_on_mac":
+                guard let cmd = str("command") else { throw DeviceManager.Failure(message: "command is required") }
+                let start = (str("path").map { ($0 as NSString).expandingTildeInPath }) ?? FileManager.default.currentDirectoryPath
+                guard let root = Rules.roots("", cwd: start).first else { throw DeviceManager.Failure(message: "\(start) is not inside a git worktree.") }
+                out = try Peers.runRemote(path: root, command: cmd, host: str("host"), simulator: a["simulator"] as? Bool ?? cmd.contains("xcodebuild"),
+                                          artifacts: (a["artifacts"] as? [String]) ?? [], session: DeviceManager.session)
             case "prepare_worktree":
                 let start = (str("path").map { ($0 as NSString).expandingTildeInPath }) ?? FileManager.default.currentDirectoryPath
                 guard let root = Rules.roots("", cwd: start).first else { throw DeviceManager.Failure(message: "\(start) is not inside a git worktree.") }
