@@ -30,7 +30,7 @@ func thermalColor(_ t: ProcessInfo.ThermalState) -> Color {
 }
 func tempText(_ s: SysSnapshot) -> String { s.tempMax.map { String(format: "%.0f°C", $0) } ?? "—" }
 
-extension String { func ifEmpty(_ s: String) -> String { isEmpty ? s : self } }
+extension String { func ifEmpty(_ s: String) -> String { isEmpty ? s : self }; var nilIfEmpty: String? { isEmpty ? nil : self } }
 
 // MARK: Shell
 

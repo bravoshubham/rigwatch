@@ -24,8 +24,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleExecutable</key><string>RigWatch</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.10.2</string>
-  <key>CFBundleVersion</key><string>26</string>
+  <key>CFBundleShortVersionString</key><string>1.11.0</string>
+  <key>CFBundleVersion</key><string>27</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

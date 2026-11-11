@@ -26,7 +26,10 @@ struct PeerInfo: Codable, Equatable {
     var avds: [String]
     var xcode: Bool
     var gpu: Int?                  // GPU busy %, from RigWatch 1.10
-    var busy: Double { Peers.busy(pressure: pressure, load: load, cores: cores, gpu: gpu ?? 0) }
+    var home: String?              // its home folder (where copies of other Macs' worktrees live), from RigWatch 1.11
+    var cpuNow: Double?            // share of all cores in use when asked, from RigWatch 1.11
+    var memFree: Int?              // free memory %, from RigWatch 1.11
+    var busy: Double { Peers.busy(cpu: max(cpuNow ?? 0, load / Double(max(1, cores))), gpu: gpu ?? 0, memFree: memFree ?? 100, pressure: pressure) }
 }
 struct PeerDevice: Codable, Equatable { var id: String, name: String, free: Bool }
 
@@ -35,15 +38,39 @@ enum Peers {
 
     // MARK: how busy a Mac is
 
-    /// 0 when idle, about 1 when the CPU (1-minute load per core) or the GPU is flat out; memory pressure adds
-    /// 0.5 (warning) or 1 (critical). Offloading needs another Mac at least `margin` less busy, so a near tie
-    /// doesn't send work back and forth.
-    static func busy(pressure: Int32, load: Double, cores: Int, gpu: Int) -> Double {
-        max(load / Double(max(1, cores)), Double(gpu) / 100) + (pressure >= 4 ? 1 : pressure >= 2 ? 0.5 : 0)
+    /// 0 when idle, about 1 when flat out. CPU is the higher of the share of all cores in use right now and the
+    /// 1-minute load per core (it lags, but counts work waiting for a core). The GPU counts only when it is nearly
+    /// flat out (90% or more). Memory adds 0.5 when free memory is under the limit or macOS warns of pressure, and 1
+    /// when pressure is critical. Offloading in balanced mode needs another Mac at least `margin` less busy, so a
+    /// near tie doesn't send work back and forth.
+    static func busy(cpu: Double, gpu: Int, memFree: Int, pressure: Int32) -> Double {
+        max(cpu, gpu >= 90 ? Double(gpu) / 100 : 0) + (pressure >= 4 ? 1 : pressure >= 2 || memFree < limits.memFreeMin ? 0.5 : 0)
     }
     static let margin = 0.25
-    /// This Mac is busy enough that its work should go to a clearly less busy Mac if one can take it.
-    static let busyAt = 0.85
+    /// The Rules page's limits, read once per process.
+    static let limits = RuleSettings.load()
+    /// This Mac is busy enough that its work should go to another Mac if one can take it.
+    static var busyAt: Double { limits.busyAt }
+
+    /// Share of all cores in use, over a quarter of a second.
+    static func cpuNow() -> Double {
+        func ticks() -> (busy: Double, all: Double) {
+            var info = host_cpu_load_info()
+            var n = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.size / MemoryLayout<integer_t>.size)
+            _ = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(n)) { host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &n) } }
+            let t = info.cpu_ticks, user = Double(t.0), sys = Double(t.1), idle = Double(t.2), nice = Double(t.3)
+            return (user + sys + nice, user + sys + idle + nice)
+        }
+        let a = ticks(); usleep(250_000); let b = ticks()
+        let all = b.all - a.all
+        return all > 0 ? (b.busy - a.busy) / all : 0
+    }
+    /// Free memory %, as macOS counts it for memory pressure.
+    static func memFreeNow() -> Int {
+        var v: Int32 = 100, n = MemoryLayout<Int32>.size
+        sysctlbyname("kern.memorystatus_level", &v, &n, nil, 0)
+        return Int(v)
+    }
 
     static func gpuNow() -> Int {
         let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOAccelerator"))
@@ -52,14 +79,17 @@ enum Peers {
         return st?["Device Utilization %"] as? Int ?? 0
     }
 
-    static func here() -> (busy: Double, pressure: Int32, cpu: Int, gpu: Int) {
+    struct Load { var busy: Double, pressure: Int32, cpu: Int, gpu: Int, memFree: Int }
+    static func here() -> Load {
         var l = [Double](repeating: 0, count: 3); getloadavg(&l, 3)
-        let cores = ProcessInfo.processInfo.activeProcessorCount, p = Rules.pressure(), g = gpuNow()
+        let cores = ProcessInfo.processInfo.activeProcessorCount, p = Rules.pressure(), g = gpuNow(), m = memFreeNow()
+        let cpu = max(cpuNow(), l[0] / Double(max(1, cores)))
         // RIGWATCH_BUSY_HERE stands in for this Mac's load (used to test offloading on one Mac).
         let forced = ProcessInfo.processInfo.environment["RIGWATCH_BUSY_HERE"].flatMap(Double.init)
-        return (forced ?? busy(pressure: p, load: l[0], cores: cores, gpu: g), p, Int(100 * l[0] / Double(max(1, cores))), g)
+        return Load(busy: forced ?? busy(cpu: cpu, gpu: g, memFree: m, pressure: p), pressure: p, cpu: Int(100 * cpu), gpu: g, memFree: m)
     }
-    static func hereIsBusy(_ h: (busy: Double, pressure: Int32, cpu: Int, gpu: Int)) -> Bool { h.pressure >= 2 || h.busy >= busyAt }
+    /// Overloaded: CPU (or a flat-out GPU) at the Rules page's limit, free memory under its limit, or memory pressure.
+    static func hereIsBusy(_ h: Load) -> Bool { h.pressure >= 2 || h.memFree < limits.memFreeMin || h.busy >= busyAt }
 
     /// What the last check of each Mac found, so the hook can tell without asking over SSH.
     struct Seen: Codable { var at: Date; var info: PeerInfo }
@@ -78,11 +108,11 @@ enum Peers {
     /// Load here and on the allowed Macs, as last seen (for build_queue).
     static func loadReport() -> String {
         let h = here(), seen = seen()
-        var lines = ["load here: busy \(String(format: "%.2f", h.busy)) (CPU \(h.cpu)% of cores, GPU \(h.gpu)%, memory pressure \(Views.pressureName(h.pressure).lowercased()))\(hereIsBusy(h) ? " - busy: prefer run_on_mac for heavy builds and tests" : "")"]
+        var lines = ["load here: busy \(String(format: "%.2f", h.busy)) (CPU \(h.cpu)% of cores, \(h.memFree)% memory free, GPU \(h.gpu)%, memory pressure \(Views.pressureName(h.pressure).lowercased()))\(hereIsBusy(h) ? " - overloaded: builds go to another Mac that can take them" : "")"]
         for p in load() where p.allowed {
             guard let s = seen[p.host], Date().timeIntervalSince(s.at) < 600 else { lines.append("\(p.host): not checked lately"); continue }
             let i = s.info
-            lines.append("\(p.host) (\(i.name)): busy \(String(format: "%.2f", i.busy)), \(i.sharing ? "sharing" : "not sharing"), \(i.emulators.filter(\.free).count) free emulators, \(i.avds.count) AVDs\(i.xcode ? ", Xcode" : ""), checked \(Int(Date().timeIntervalSince(s.at) / 60)) min ago")
+            lines.append("\(p.host) (\(i.name)): busy \(String(format: "%.2f", i.busy))\(i.memFree.map { ", \($0)% memory free" } ?? ""), \(i.sharing ? "sharing" : "not sharing"), \(i.emulators.filter(\.free).count) free emulators, \(i.avds.count) AVDs\(i.xcode ? ", Xcode" : ""), checked \(Int(Date().timeIntervalSince(s.at) / 60)) min ago")
         }
         if lines.count == 1 { lines.append("other Macs: none allowed") }
         return lines.joined(separator: "\n")
@@ -92,6 +122,8 @@ enum Peers {
     /// busy (as last seen), at most every 15 minutes per session.
     static func offloadHint(_ cmd: String, kind: String, session: String?) -> String? {
         guard let session, !session.isEmpty, kind == "gradle" || kind == "xcodebuild" else { return nil }
+        let st = RuleSettings.load()
+        if st.offloadBuilds && st.queueBuilds { return nil }   // builds go to a less busy Mac by themselves
         let h = here()
         guard hereIsBusy(h) else { return nil }
         let ios = kind == "xcodebuild"
@@ -112,7 +144,7 @@ enum Peers {
         if let last = said[session], Date().timeIntervalSince(last) < 900 { return nil }
         said = said.filter { Date().timeIntervalSince($0.value) < 86400 }; said[session] = Date()
         Rules.write(try? Leases.encoder.encode(said), to: file)
-        return "RigWatch: this Mac is busy (CPU \(h.cpu)% of cores, GPU \(h.gpu)%, memory pressure \(Views.pressureName(h.pressure).lowercased())), and \(info.name) (\(host)) is much less busy. "
+        return "RigWatch: this Mac is busy (CPU \(h.cpu)% of cores, \(h.memFree)% memory free, GPU \(h.gpu)%, memory pressure \(Views.pressureName(h.pressure).lowercased())), and \(info.name) (\(host)) is much less busy. "
             + "This command still runs here. For the next heavy \(ios ? "xcodebuild" : "Gradle") build or device test, consider the rigwatch MCP tool run_on_mac with host \(host): "
             + "it runs the command there with \(ios ? "a simulator ($RIGWATCH_SIM_UDID)" : "an emulator (ANDROID_SERIAL)") of its own and copies back the result files you list in artifacts."
     }
@@ -320,6 +352,23 @@ enum Peers {
             do { let i = try install(on: a[1], share: a.contains("--share")); print("RigWatch \(i.version) on \(i.name), sharing \(i.sharing ? "on" : "off")"); return 0 }
             catch let f as DeviceManager.Failure { Rules.say(f.message); return 1 } catch { Rules.say("\(error)"); return 1 }
         case "refresh": refreshAllowed(); return 0
+        case "sync": return Offload.sync(Array(a.dropFirst()))
+        case "exec": return Offload.exec(Array(a.dropFirst()))
+        case "plan":
+            // `peer plan [--cwd D] -- CMD`: whether and how a build would run on another Mac (for checking the rules).
+            guard let sep = a.firstIndex(of: "--") else { return 2 }
+            let cwd = a.firstIndex(of: "--cwd").map { a[$0 + 1] } ?? FileManager.default.currentDirectoryPath
+            let cmd = a[(sep + 1)...].joined(separator: " "), kind = Rules.classify(cmd) ?? "?"
+            print("command: \(Offload.wrap(cmd) ?? "no build to move")")
+            var why = ""
+            if let sh = Offload.shape(["/bin/zsh", "-c", cmd], kind: kind, cwd: cwd, why: &why) {
+                print("moves: \(kind) root=\(sh.root) rel=\(sh.rel)\(sh.simulator ? " simulator" : "")\(sh.emulator ? " emulator" : "")\(sh.device.map { " name=" + $0 } ?? "")")
+                print("  there: \(sh.cmd)")
+                for b in sh.back { print("  back: \(b.from) -> \(b.to)") }
+                if sh.gradleResults { print("  back: build/outputs, reports, test-results") }
+                if !sh.keep.isEmpty { print("  keep: \(sh.keep.joined(separator: ", "))") }
+            } else { print("stays here: \(why)") }
+            return 0
         case "authorize": return authorize(Array(a.dropFirst()))
         case "share" where a.count == 2 && ["on", "off"].contains(a[1]):
             var s = RuleSettings.load(); s.shareDevices = a[1] == "on"; s.save()
@@ -335,7 +384,7 @@ enum Peers {
         return PeerInfo(name: localName, version: AppCopy.ownVersion, sharing: s.shareDevices, cores: ProcessInfo.processInfo.activeProcessorCount,
                         memGB: Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824, pressure: Rules.pressure(), load: l[0],
                         emulators: devs.filter { $0.kind == .emulator }.map(row), simulators: devs.filter { $0.kind == .simulator }.map(row),
-                        avds: DeviceManager.avds(), xcode: FileManager.default.fileExists(atPath: "/Applications/Xcode.app"), gpu: gpuNow())
+                        avds: DeviceManager.avds(), xcode: FileManager.default.fileExists(atPath: "/Applications/Xcode.app"), gpu: gpuNow(), home: Sh.home, cpuNow: cpuNow(), memFree: memFreeNow())
     }
 
     /// Leases an emulator here for an agent on another Mac and keeps it until that Mac hangs up (stdin closes).
@@ -399,9 +448,15 @@ enum Peers {
         }
         guard FileManager.default.changeCurrentDirectoryPath(dir) else { Rules.say("RigWatch on \(localName): no folder \(dir)"); return 1 }
         fixSdkDir(dir)
-        // Through this Mac's own queue, so a build from another Mac waits its turn like any other.
-        let kind = Rules.classify(cmd) ?? "xcodebuild"
-        return Rules.run(["--kind", kind, "--", "/bin/zsh", "-lc", cmd])
+        let kind = arg("--kind") ?? Rules.classify(cmd) ?? "xcodebuild"
+        if kind == "gradle" { fixJava() } else { fixXcode() }
+        // The Mac that sent it hangs up when its command is stopped: stop the build here too.
+        if a.contains("--watch-stdin") {
+            Thread.detachNewThread { _ = FileHandle.standardInput.readDataToEndOfFile(); kill(getpid(), SIGTERM) }
+        }
+        // Through this Mac's own queue (never on to a third Mac), with this Mac's thread count.
+        let s = RuleSettings.load()
+        return Rules.run(["--here", "--kind", kind, "--", "/bin/zsh", "-lc", Rules.withThreads(cmd, kind: kind, n: Rules.threads(s))])
     }
 
     // MARK: letting the other Mac's adb in
@@ -452,6 +507,20 @@ enum Peers {
         return ((n[0] + n[2]) / 2, (n[1] + n[3]) / 2, tag.contains("checked=\"true\""))
     }
 
+    /// A login shell over SSH often has no Java (Android Studio brings its own): point Gradle at that one.
+    static func fixJava() {
+        guard ProcessInfo.processInfo.environment["JAVA_HOME"] == nil, Sh.run("/usr/libexec/java_home", [], timeout: 10).code != 0 else { return }
+        for j in ["/Applications/Android Studio.app/Contents/jbr/Contents/Home", "/Applications/Android Studio.app/Contents/jre/Contents/Home"]
+        where FileManager.default.fileExists(atPath: j + "/bin/java") { setenv("JAVA_HOME", j, 1); return }
+    }
+
+    /// xcode-select pointing at the Command Line Tools has no xcodebuild for apps: use Xcode itself.
+    static func fixXcode() {
+        guard ProcessInfo.processInfo.environment["DEVELOPER_DIR"] == nil, FileManager.default.fileExists(atPath: "/Applications/Xcode.app"),
+              Sh.run("/usr/bin/xcode-select", ["-p"], timeout: 10).out.contains("CommandLineTools") else { return }
+        setenv("DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer", 1)
+    }
+
     /// local.properties came from the other Mac: its sdk.dir points at that Mac's Android SDK. Point it at this one's.
     static func fixSdkDir(_ dir: String) {
         let f = dir + "/local.properties"
@@ -476,19 +545,17 @@ enum Peers {
         ranked.sort { $0.1.busy < $1.1.busy }
         guard let (peer, info) = ranked.first else { throw DeviceManager.Failure(message: "No allowed Mac is online, sharing\(simulator ? " and has Xcode" : "")\(emulator ? " and has an Android emulator" : "") right now.") }
         let host = peer.host
-        let me = localName.replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "-", options: .regularExpression)
-        let dest = "Library/Caches/RigWatch/remote/\(me)/\((path as NSString).lastPathComponent)"
+        let dest = Offload.copyDir(path)
         let ssh = (["/usr/bin/ssh"] + sshOpts).joined(separator: " ")
         let t0 = Date()
         var run = RemoteRun(host: host, mac: info.name, session: session, command: command, cwd: path, phase: "copying", since: t0,
                             pid: getpid(), pidStart: ProcSampler.startTime(getpid()) ?? 0)
         noteRun(run)
         defer { noteRun(nil, removing: run.id) }
-        _ = Sh.run("/usr/bin/ssh", sshOpts + [host, "mkdir -p " + Rules.quote(dest)], timeout: 20)
         // Build outputs stay behind; everything else, node_modules and Pods included, goes (only changes, after the first time).
-        let sync = Sh.run("/usr/bin/rsync", ["-az", "--delete", "-e", ssh, "--exclude", "/build/", "--exclude", "DerivedData/", "--exclude", ".gradle/",
-                                             "--exclude", "/app/build/", path + "/", host + ":" + dest + "/"], timeout: 1800)
+        let sync = Offload.copy(path, to: host, keep: artifacts)
         guard sync.code == 0 else { throw DeviceManager.Failure(message: "Could not copy the worktree to \(host): \(sync.err.prefix(240))") }
+        Offload.noteCopy(host, path)
         let copied = Date().timeIntervalSince(t0)
         // Result files come fresh from this run: a stale result bundle there would fail xcodebuild or come back as new.
         if !artifacts.isEmpty {

@@ -175,6 +175,16 @@ struct RulesView: View {
                     Stepper(value: $s.maxWaitMinutes, in: 2...60) { setting("waits at most \(s.maxWaitMinutes) min") }
                     Toggle(isOn: $s.lowerOutside) { setting("lower builds outside the queue") }.toggleStyle(.checkbox).controlSize(.small)
                 }
+                rule("Run builds on other Macs", $s.offloadBuilds,
+                     "When this Mac is overloaded or every build slot is taken, a queued Gradle or xcodebuild build runs on an allowed Mac that shares (Device Manager page). Only the build step moves: the rest of the command runs here, the output streams back and APKs, reports, test results and Xcode products are copied back before it goes on. Installs on devices here and signing for a phone stay here. Overloaded: CPU at the limit (the higher of the share of all cores in use now and the 1-minute load per core), free memory under the limit or memory pressure, a GPU at 90% or more, or every slot taken.") {
+                    Picker(selection: $s.offloadMode) {
+                        Text("only to a less busy Mac").tag("balanced")
+                        Text("spare this Mac").tag("spare")
+                    } label: { setting("send") }.pickerStyle(.menu).controlSize(.small).fixedSize()
+                        .help("Only to a less busy Mac: a build moves only to a Mac clearly less busy than this one and not near busy itself. Spare this Mac: it moves to any allowed Mac that shares, however busy that Mac gets (its own queue still limits how many run there), unless its memory is critical.")
+                    Stepper(value: $s.busyAt, in: 0.5...2.0, step: 0.05) { setting("overloaded at \(Int((s.busyAt * 100).rounded()))% CPU") }
+                    Stepper(value: $s.memFreeMin, in: 5...50, step: 5) { setting("or under \(s.memFreeMin)% memory free") }
+                }
                 rule("Physical devices first", $s.physicalFirst,
                      "Booting an emulator or simulator is refused while a phone of that kind is connected, or another virtual one is already running. Putting RIGWATCH_VIRTUAL=1 in front of the command lets it through.") { EmptyView() }
                 rule("Limit running emulators and simulators", $s.limitVirtual,

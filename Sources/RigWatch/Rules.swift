@@ -15,6 +15,10 @@ struct RuleSettings: Codable, Equatable {
     var physicalFirst = true
     var shareDevices = false     // other Macs' agents may use this Mac's emulators (they must also be allowed there)
     var preferPeers = true       // a new emulator starts on an allowed Mac that shares, before one boots here
+    var offloadBuilds = true     // a queued build runs on an allowed Mac that shares when this one is busy or full
+    var offloadMode = "balanced" // balanced: only to a clearly less busy Mac; spare: to any Mac that can take it, however busy
+    var busyAt = 0.85            // overloaded from this CPU use (share of all cores, or 1-minute load per core)
+    var memFreeMin = 15          // overloaded below this much free memory (%)
     var limitVirtual = true      // at most this many emulators and simulators running at once
     var maxEmulators = 2
     var maxSimulators = 2
@@ -453,7 +457,8 @@ enum Rules {
     /// `RigWatch run [--kind K] -- CMD...`: waits for a slot (first come, first served), then runs CMD
     /// at utility priority and passes its exit status on.
     static func run(_ args: [String]) -> Int32 {
-        var a = args, kind: String?
+        var a = args, kind: String?, here = false
+        if a.first == "--here" { here = true; a.removeFirst() }   // a build sent from another Mac: it runs here
         if a.first == "--kind", a.count > 1 { kind = a[1]; a.removeFirst(2) }
         if a.first == "--" { a.removeFirst() }
         guard !a.isEmpty else { say("RigWatch run: no command"); return 2 }
@@ -463,7 +468,20 @@ enum Rules {
         let me = BuildJob(pid: getpid(), start: ProcSampler.startTime(getpid()) ?? 0, kind: k, weight: weights[k] ?? 2,
                           cwd: FileManager.default.currentDirectoryPath, cmd: String(line.suffix(200)), state: "waiting", since: Date(),
                           session: session, queuedAt: Date())
-        withJobs { $0.append(me) }
+        let p = pool(me)
+        // When this Mac is busy or every slot is taken and another Mac is clearly less busy, the command starts at
+        // once without a slot here and its builds run on that Mac (`peer exec`). Checked again while it waits.
+        let wrapped = here || s.paused || !s.offloadBuilds || a.count != 3 || a[0] != "/bin/zsh" || a[1] != "-c" ? nil : Offload.wrap(a[2])
+        let root = wrapped == nil || !Peers.load().contains(where: \.allowed) ? nil : Offload.root(line, cwd: me.cwd)
+        var lastTry = Date()
+        func elsewhere(full: Bool) -> Int32? {
+            lastTry = Date()
+            guard let wrapped, let root, let host = Offload.pick(kind: k, root: root, full: full)?.host else { return nil }
+            withJobs { j in j.removeAll { $0.pid == me.pid } }
+            setenv("RIGWATCH_BUILD_ON", host, 1)
+            log("offload: command for session \(session ?? "?") builds on \(host): \(line.prefix(120))")
+            return spawn(["/usr/sbin/taskpolicy", "-c", "utility", "/bin/zsh", "-c", wrapped])
+        }
         let slot = NSLock()
         var held = true   // the slot is ours until the build tool exits or the command ends
         let release = { slot.lock(); defer { slot.unlock() }; if held { held = false; withJobs { j in j.removeAll { $0.pid == me.pid } } } }
@@ -474,11 +492,17 @@ enum Rules {
             src.setEventHandler { if child > 0 { kill(child, sig) } else { release(); exit(128 + sig) } }
             src.resume(); sources.append(src)
         }
+        // Another Mac first, when this one is busy or the build would wait for a slot.
+        if root != nil {
+            let full = s.queueBuilds && withJobs { j in j.contains { $0.state == "waiting" && pool($0) == p } || !fits(p, me.weight, j, s) }
+            if let code = elsewhere(full: full) { withExtendedLifetime(sources) {}; return code }
+        }
+        withJobs { $0.append(me) }
         // A new worktree gets node_modules, Pods and Xcode caches matching its lockfiles before anything runs.
         let roots = roots(line, cwd: me.cwd)
         for r in roots { for n in DepCache.prepare(r) { say("RigWatch: " + n) } }
         if k == "xcodebuild" { for n in DepCache.prepareDerivedData(cmd: line, cwd: me.cwd) { say("RigWatch: " + n) } }
-        let queue = s.queueBuilds && !s.paused, p = pool(me)
+        let queue = s.queueBuilds && !s.paused
         let t0 = Date(), maxWait = TimeInterval(max(1, s.maxWaitMinutes) * 60)
         var last = "", overflow = false, forced = false
         while true {
@@ -496,6 +520,7 @@ enum Rules {
                 j[i].state = "running"; j[i].since = Date(); return nil
             }
             guard let ahead else { break }
+            if root != nil, Date().timeIntervalSince(lastTry) > 20, let code = elsewhere(full: true) { withExtendedLifetime(sources) {}; return code }
             let msg = ahead.map { "\($0.kind) \($0.state) in \(($0.cwd as NSString).lastPathComponent)" }.joined(separator: "; ")
             if msg != last {
                 let by = t0.addingTimeInterval(maxWait).formatted(date: .omitted, time: .shortened)

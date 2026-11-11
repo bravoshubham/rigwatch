@@ -21,8 +21,9 @@ struct BuildsView: View {
                 if waiting.isEmpty { Text("Nothing is waiting for a slot").hudLabel().padding(.leading, 14) }
                 else { rows { ForEach(waiting) { waitingRow($0, waiting, s) } } }
                 SectionTitle(title: "Running on other Macs", aspect: .android, count: m.remoteRuns.count)
-                if m.remoteRuns.isEmpty { Text("No build or test from this Mac is running on another Mac (run_on_mac)").hudLabel().padding(.leading, 14) }
+                if m.remoteRuns.isEmpty { Text("No build or test from this Mac is running on another Mac. Builds go to an allowed Mac that shares when this one is busy or its slots are full.").hudLabel().padding(.leading, 14) }
                 else { rows { ForEach(m.remoteRuns) { remoteRow($0) } } }
+                ForEach(m.offloadSkips, id: \.self) { Text($0).hudLabel().foregroundStyle(red).padding(.leading, 14) }
                 SectionTitle(title: "Running outside the queue", aspect: .process, count: m.outside.count)
                 if m.outside.isEmpty { Text("Every running build goes through the queue").hudLabel().padding(.leading, 14) }
                 else {
@@ -146,7 +147,7 @@ struct BuildsView: View {
             kindChip(Rules.classify(r.command) ?? "build")
             project(r.cwd)
             SessionLink(id: r.session)
-            Chip(text: "ON \(r.mac.uppercased())", icon: "laptopcomputer", color: Aspect.android.color).fixedSize().help("Running on \(r.mac) (\(r.host)) through run_on_mac.")
+            Chip(text: "ON \(r.mac.uppercased())", icon: "laptopcomputer", color: Aspect.android.color).fixedSize().help("Running on \(r.mac) (\(r.host)): moved there by the build queue, or through run_on_mac.")
             Text(r.command).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(r.command)
             Spacer(minLength: 8)
             Text(r.phase.uppercased()).hudLabel().fixedSize()

@@ -356,7 +356,14 @@ enum MCPServer {
     prepare_worktree before the first install or build: it copies in node_modules, Pods and Xcode caches that match \
     its lockfiles, so the first build isn't a cold one.
 
-    This Mac can share its load with other Macs the user allowed (Device Manager page). Two ways:
+    This Mac can share its load with other Macs the user allowed (Device Manager page). Three ways:
+    - Gradle and xcodebuild commands you run go through RigWatch's build queue, which builds on a clearly less \
+    busy allowed Mac by itself when this one is busy or its build slots are full. You run commands as usual: only \
+    the ./gradlew or xcodebuild step runs there, the rest of your command (variables, log redirects, an adb or \
+    simctl install afterwards) runs here. The output streams back (paths shown as this Mac's), the exit code is \
+    the build's, and APKs, reports, test results and Xcode products come back to where they would have been \
+    before the next step of your command runs. Installing on a device here (installDebug), archiving and \
+    building for a real iPhone always build here.
     - acquire_device may hand you an Android emulator running on another Mac when this one is busy or full. Its id \
     looks like 127.0.0.1:PORT (an SSH tunnel); use it like any adb device. Nothing else changes for you.
     - run_on_mac moves a whole build or test to the least busy allowed Mac: it copies the worktree there, runs your \

@@ -52,6 +52,7 @@ final class Monitor: ObservableObject {
     @Published var agentOwner: [Int32: String] = [:]   // pid -> session id, for agents other than Claude Code
     @Published var top: TopKind?                         // the Top CPU / Top memory sheet, when open
     @Published var asks: [Ask] = []                      // open "is it safe to shut down?" questions (asks.json)
+    @Published var offloadSkips: [String] = []             // Macs not sent a project's builds for a while, and why
     @Published var remoteRuns: [Peers.RemoteRun] = []     // this Mac's run_on_mac runs in progress (remote-runs.json)
     @Published var peerRows: [PeerRow] = []              // other Macs this Mac's agents may use, and how they are
     private var peersAt = Date.distantPast
@@ -213,6 +214,11 @@ final class Monitor: ObservableObject {
             let jobs = Demo.on ? [] : Rules.jobs(), outside = Demo.on ? [] : Rules.outsideQueue(ps)
             let governed = Demo.on ? [] : self.governor.apply(ps)
             let buildHistory: [BuildRecord]? = tab == .builds && Date().timeIntervalSince(self.historyAt) > 5 ? BuildHistory.recent(40) : nil
+            let skips: [String]? = buildHistory == nil || Demo.on ? nil : Offload.failures().filter { Date().timeIntervalSince($0.value.at) < Offload.skipFor }
+                .sorted { $0.value.at > $1.value.at }.map { k, f in
+                    let parts = k.split(separator: "|", maxSplits: 1).map(String.init)
+                    return "\(Views.tilde(parts.last ?? k)) not sent to \(parts.first ?? "?") until \(Leases.time(f.at.addingTimeInterval(Offload.skipFor))): \(f.why)"
+                }
             let actions = index.lastAction
             DispatchQueue.main.async {
                 self.sys = s; self.procs = ps; self.groups = groups; self.sessions = sess; self.servers = servers; self.agentOwner = owner
@@ -227,6 +233,7 @@ final class Monitor: ObservableObject {
                 if remoteRuns != self.remoteRuns { self.remoteRuns = remoteRuns }
                 if governed != self.governed { self.governed = governed }
                 if let buildHistory { self.buildHistory = buildHistory; self.historyAt = Date() }
+                if let skips, skips != self.offloadSkips { self.offloadSkips = skips }
                 self.selfCPU = own?.cpu ?? 0; self.selfMem = own?.mem ?? 0
                 self.record(s, ps, groups)
                 self.running = false
