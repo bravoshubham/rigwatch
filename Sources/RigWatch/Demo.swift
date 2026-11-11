@@ -206,6 +206,11 @@ enum Demo {
                 .init(host: "build-mbp", allowed: false, status: .noRigWatch)]
     }
 
+    static func remoteRuns() -> [Peers.RemoteRun] {
+        [Peers.RemoteRun(host: "studio", mac: "Studio", session: sessionSeed[0].id, command: "./gradlew connectedDebugAndroidTest",
+                         cwd: Sh.home + "/code/shop-android", phase: "running", since: ago(260), pid: 0, pidStart: 0)]
+    }
+
     static func bootable() -> (avds: [String], sims: [DeviceManager.Sim]) {
         let v = [18, 2]
         return (["Pixel_8_API_35", "Pixel_Tablet_API_34", "Pixel_Fold_API_35", "Medium_Phone_API_35"],

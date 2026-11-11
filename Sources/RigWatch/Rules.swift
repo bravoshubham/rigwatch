@@ -995,6 +995,7 @@ struct BuildRecord: Codable, Identifiable {
     let waited: TimeInterval
     let overflow: Bool, forced: Bool, releasedEarly: Bool
     let exit: Int32
+    var host: String? = nil        // the other Mac it ran on (run_on_mac)
     var id: Date { queuedAt }
     var ran: TimeInterval { endedAt.timeIntervalSince(startedAt) }
 }

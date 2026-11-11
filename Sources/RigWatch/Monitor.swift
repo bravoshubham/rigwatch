@@ -52,6 +52,7 @@ final class Monitor: ObservableObject {
     @Published var agentOwner: [Int32: String] = [:]   // pid -> session id, for agents other than Claude Code
     @Published var top: TopKind?                         // the Top CPU / Top memory sheet, when open
     @Published var asks: [Ask] = []                      // open "is it safe to shut down?" questions (asks.json)
+    @Published var remoteRuns: [Peers.RemoteRun] = []     // this Mac's run_on_mac runs in progress (remote-runs.json)
     @Published var peerRows: [PeerRow] = []              // other Macs this Mac's agents may use, and how they are
     private var peersAt = Date.distantPast
     @Published var leases: [Lease] = []                  // devices lent to agent sessions (leases.json)
@@ -154,8 +155,6 @@ final class Monitor: ObservableObject {
     }
 
     func refresh(visible: Bool = true, worktreesNow: Bool = false) {
-        // Keeps the other Macs' load fresh for the hook's offload hint and for agents, page open or not.
-        if !Demo.on, Date().timeIntervalSince(peersAt) > 60, Peers.load().contains(where: \.allowed) { loadPeers() }
         guard !running else { return }
         if Demo.on {
             let ps = Demo.procs(tick)
@@ -164,7 +163,7 @@ final class Monitor: ObservableObject {
             if history.isEmpty { history = Demo.history() }
             servers = Demo.servers(tick); sessions = Self.attach(servers, to: Demo.sessions(tick))
             if worktrees.isEmpty { worktrees = Demo.worktrees() }
-            leases = Demo.leases(); peerRows = Demo.peers(); jobs = Demo.jobs(); outside = Demo.outside(); governed = Set(outside.map(\.pid))
+            leases = Demo.leases(); peerRows = Demo.peers(); remoteRuns = Demo.remoteRuns(); jobs = Demo.jobs(); outside = Demo.outside(); governed = Set(outside.map(\.pid))
             if buildHistory.isEmpty { buildHistory = Demo.buildHistory() }
             if bootable == nil { bootable = Demo.bootable() }
             selfCPU = 0.5; selfMem = 140 << 20
@@ -173,6 +172,8 @@ final class Monitor: ObservableObject {
         }
         running = true
         let tab = self.tab
+        // Other Macs are asked over SSH only while their section is on screen, every 2 minutes; agents and the hook ask when they need to.
+        if visible, tab == .deviceManager, Date().timeIntervalSince(peersAt) > 120 { loadPeers() }
         // Overview and Memory list idle emulators under "What you can free": a light device check, at most once a minute.
         let devicesForFree = (tab == .overview || tab == .memory) && emulatorCount + simulatorCount > 0 && Date().timeIntervalSince(lastDevices) > 60
         let wantDevices = visible && (tab == .devices || tab == .deviceManager || tab == .sessions || devicesForFree)
@@ -207,6 +208,8 @@ final class Monitor: ObservableObject {
             let owner = agents.owner
             let mentions = index.mentions
             let leases = Demo.on ? [] : Leases.live()   // every refresh: the sidebar counts them on any page
+            // Work this Mac has on other Macs: a local file, no SSH.
+            let remoteRuns = Demo.on ? [] : (tab == .builds || tab == .deviceManager ? Peers.activeRuns() : self.remoteRuns)
             let jobs = Demo.on ? [] : Rules.jobs(), outside = Demo.on ? [] : Rules.outsideQueue(ps)
             let governed = Demo.on ? [] : self.governor.apply(ps)
             let buildHistory: [BuildRecord]? = tab == .builds && Date().timeIntervalSince(self.historyAt) > 5 ? BuildHistory.recent(40) : nil
@@ -221,6 +224,7 @@ final class Monitor: ObservableObject {
                 }
                 if leases != self.leases { self.leases = leases }
                 self.jobs = jobs; self.outside = outside
+                if remoteRuns != self.remoteRuns { self.remoteRuns = remoteRuns }
                 if governed != self.governed { self.governed = governed }
                 if let buildHistory { self.buildHistory = buildHistory; self.historyAt = Date() }
                 self.selfCPU = own?.cpu ?? 0; self.selfMem = own?.mem ?? 0

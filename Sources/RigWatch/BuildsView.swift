@@ -20,6 +20,9 @@ struct BuildsView: View {
                 SectionTitle(title: "Waiting", aspect: .cpu, count: waiting.count)
                 if waiting.isEmpty { Text("Nothing is waiting for a slot").hudLabel().padding(.leading, 14) }
                 else { rows { ForEach(waiting) { waitingRow($0, waiting, s) } } }
+                SectionTitle(title: "Running on other Macs", aspect: .android, count: m.remoteRuns.count)
+                if m.remoteRuns.isEmpty { Text("No build or test from this Mac is running on another Mac (run_on_mac)").hudLabel().padding(.leading, 14) }
+                else { rows { ForEach(m.remoteRuns) { remoteRow($0) } } }
                 SectionTitle(title: "Running outside the queue", aspect: .process, count: m.outside.count)
                 if m.outside.isEmpty { Text("Every running build goes through the queue").hudLabel().padding(.leading, 14) }
                 else {
@@ -78,7 +81,8 @@ struct BuildsView: View {
         HStack(spacing: 10) {
             kindChip(j.kind)
             project(j.cwd)
-            if let s = j.session { SessionLink(id: s) }
+            if let from = Self.fromMac(j.session) { Chip(text: "FOR \(from.uppercased())", icon: "laptopcomputer", color: Aspect.android.color).fixedSize().help("Sent here by RigWatch on \(from) (run_on_mac).") }
+            else if let s = j.session { SessionLink(id: s) }
             if j.overflow == true { Chip(text: "AFTER MAX WAIT · BACKGROUND", color: amber).fixedSize().help("It waited the longest allowed and started anyway, at background priority.") }
             if j.force == true { Chip(text: "STARTED NOW", color: Aspect.process.color).fixedSize() }
             Text(j.cmd).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(j.cmd)
@@ -124,7 +128,9 @@ struct BuildsView: View {
         HStack(spacing: 10) {
             kindChip(r.kind)
             project(r.cwd)
-            if let s = r.session { SessionLink(id: s) }
+            if let h = r.host { Chip(text: "ON \(h.uppercased())", icon: "laptopcomputer", color: Aspect.android.color).fixedSize() }
+            if let from = Self.fromMac(r.session) { Chip(text: "FOR \(from.uppercased())", icon: "laptopcomputer", color: Aspect.android.color).fixedSize() }
+            else if let s = r.session { SessionLink(id: s) }
             if r.overflow { Chip(text: "MAX WAIT", color: amber).fixedSize() }
             if r.forced { Chip(text: "STARTED NOW", color: Aspect.process.color).fixedSize() }
             if r.releasedEarly { Chip(text: "SLOT FREED EARLY", color: green).fixedSize().help("The build tool finished before the rest of its command; the slot went to the next build then.") }
@@ -133,6 +139,25 @@ struct BuildsView: View {
             Text("waited \(Self.span(r.waited)) · ran \(Self.span(r.ran))").font(.system(size: 10.5, design: .monospaced)).fixedSize()
             Chip(text: r.exit == 0 ? "OK" : "EXIT \(r.exit)", color: r.exit == 0 ? green : red).fixedSize()
         }
+    }
+
+    func remoteRow(_ r: Peers.RemoteRun) -> some View {
+        HStack(spacing: 10) {
+            kindChip(Rules.classify(r.command) ?? "build")
+            project(r.cwd)
+            SessionLink(id: r.session)
+            Chip(text: "ON \(r.mac.uppercased())", icon: "laptopcomputer", color: Aspect.android.color).fixedSize().help("Running on \(r.mac) (\(r.host)) through run_on_mac.")
+            Text(r.command).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(r.command)
+            Spacer(minLength: 8)
+            Text(r.phase.uppercased()).hudLabel().fixedSize()
+            Text("for \(Self.span(Date().timeIntervalSince(r.since)))").hudLabel().fixedSize()
+        }
+    }
+
+    /// The other Mac a build here runs for: run_on_mac sessions are named "MAC/session".
+    static func fromMac(_ session: String?) -> String? {
+        guard let s = session, let slash = s.firstIndex(of: "/"), slash != s.startIndex, !s.hasPrefix("pid:") else { return nil }
+        return String(s[..<slash])
     }
 
     static func span(_ t: TimeInterval) -> String {

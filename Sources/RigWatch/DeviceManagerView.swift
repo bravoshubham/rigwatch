@@ -204,6 +204,7 @@ struct DeviceManagerView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(r.host).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
                 Text(peerStatus(r.status)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2)
+                if let use = peerUse(r.host) { Text(use).font(.system(size: 10.5, weight: .semibold, design: .monospaced)).foregroundStyle(Aspect.android.color).lineLimit(2) }
             }
             Spacer(minLength: 8)
             if case .online(let i) = r.status {
@@ -222,6 +223,14 @@ struct DeviceManagerView: View {
                 Button("Allow") { m.confirmAllowPeer(r, true) }.buttonStyle(HUDButton(color: Color(hex: 0x3DDC97)))
             }
         }
+    }
+
+    /// What this Mac has on that Mac right now, from local files (no SSH).
+    func peerUse(_ host: String) -> String? {
+        let emus = m.leases.filter { $0.remote == host }.map { "emulator \($0.name) for \(m.sessionLabel($0.session))" }
+        let runs = m.remoteRuns.filter { $0.host == host }.map { "\(Rules.classify($0.command) ?? "build") \($0.phase) for \(m.sessionLabel($0.session))" }
+        let all = emus + runs
+        return all.isEmpty ? nil : "IN USE BY THIS MAC: " + all.joined(separator: " · ")
     }
 
     func peerStatus(_ st: Peers.Status?) -> String {

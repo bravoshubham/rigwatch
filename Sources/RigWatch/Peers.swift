@@ -94,8 +94,15 @@ enum Peers {
         let h = here()
         guard hereIsBusy(h) else { return nil }
         let ios = kind == "xcodebuild"
-        let best = load().filter(\.allowed).compactMap { p -> (String, PeerInfo)? in
-            guard let s = seen()[p.host], Date().timeIntervalSince(s.at) < 300, s.info.sharing, s.info.busy <= h.busy - margin, !ios || s.info.xcode else { return nil }
+        let allowed = load().filter(\.allowed)
+        guard !allowed.isEmpty else { return nil }
+        let fresh = seen()
+        if !allowed.contains(where: { fresh[$0.host].map { Date().timeIntervalSince($0.at) < 300 } ?? false }) {
+            // Nothing recent to go on: ask the other Macs in the background (no wait here); the hint comes with a later build.
+            startRefresh(); return nil
+        }
+        let best = allowed.compactMap { p -> (String, PeerInfo)? in
+            guard let s = fresh[p.host], Date().timeIntervalSince(s.at) < 300, s.info.sharing, s.info.busy <= h.busy - margin, !ios || s.info.xcode else { return nil }
             return (p.host, s.info)
         }.min { $0.1.busy < $1.1.busy }
         guard let (host, info) = best else { return nil }
@@ -107,6 +114,51 @@ enum Peers {
         return "RigWatch: this Mac is busy (CPU \(h.cpu)% of cores, GPU \(h.gpu)%, memory pressure \(Views.pressureName(h.pressure).lowercased())), and \(info.name) (\(host)) is much less busy. "
             + "This command still runs here. For the next heavy \(ios ? "xcodebuild" : "Gradle") build or device test, consider the rigwatch MCP tool run_on_mac with host \(host): "
             + "it runs the command there with \(ios ? "a simulator ($RIGWATCH_SIM_UDID)" : "an emulator (ANDROID_SERIAL)") of its own and copies back the result files you list in artifacts."
+    }
+
+    // MARK: work this Mac has on other Macs
+
+    /// A run_on_mac in progress, written by the MCP server running it, so the app shows where the work is
+    /// without asking any Mac over SSH.
+    struct RemoteRun: Codable, Equatable, Identifiable {
+        var host: String, mac: String, session: String, command: String, cwd: String
+        var phase: String              // copying, running, copying back
+        var since: Date
+        var pid: Int32, pidStart: UInt64
+        var id: String { "\(pid)-\(Int(since.timeIntervalSince1970))" }   // whole seconds: the file keeps no fractions
+    }
+    static let runsFile = Rules.dir + "/remote-runs.json"
+    private static let runsLock = NSLock()
+
+    /// Runs still in progress: one whose MCP server has gone is dropped.
+    static func activeRuns() -> [RemoteRun] {
+        (FileManager.default.contents(atPath: runsFile).flatMap { try? Leases.decoder.decode([RemoteRun].self, from: $0) } ?? [])
+            .filter { ProcSampler.startTime($0.pid) == $0.pidStart }
+    }
+    static func noteRun(_ r: RemoteRun?, removing id: String? = nil) {
+        runsLock.lock(); defer { runsLock.unlock() }
+        var all = activeRuns().filter { $0.id != (r?.id ?? id) }
+        if let r { all.append(r) }
+        Rules.write(try? Leases.encoder.encode(all), to: runsFile)
+    }
+
+    /// Asks every allowed Mac how it is, at once, and remembers the answers.
+    static func refreshAllowed() {
+        let g = DispatchGroup()
+        for p in load() where p.allowed { g.enter(); DispatchQueue.global().async { _ = probe(p.host); g.leave() } }
+        g.wait()
+    }
+
+    /// `RigWatch peer refresh` in the background, at most once every 5 minutes.
+    static func startRefresh() {
+        let stamp = Rules.dir + "/peer-refresh.stamp"
+        if let d = (try? FileManager.default.attributesOfItem(atPath: stamp))?[.modificationDate] as? Date, Date().timeIntervalSince(d) < 300 { return }
+        Rules.write(Data(), to: stamp)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: CommandLine.arguments[0].hasPrefix("/") ? CommandLine.arguments[0] : Bundle.main.executablePath ?? "")
+        p.arguments = ["peer", "refresh"]
+        p.standardInput = FileHandle.nullDevice; p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        try? p.run()
     }
 
     static func load() -> [Peer] { FileManager.default.contents(atPath: file).flatMap { try? JSONDecoder().decode([Peer].self, from: $0) } ?? [] }
@@ -253,10 +305,11 @@ enum Peers {
         case "install" where a.count >= 2:
             do { let i = try install(on: a[1], share: a.contains("--share")); print("RigWatch \(i.version) on \(i.name), sharing \(i.sharing ? "on" : "off")"); return 0 }
             catch let f as DeviceManager.Failure { Rules.say(f.message); return 1 } catch { Rules.say("\(error)"); return 1 }
+        case "refresh": refreshAllowed(); return 0
         case "share" where a.count == 2 && ["on", "off"].contains(a[1]):
             var s = RuleSettings.load(); s.shareDevices = a[1] == "on"; s.save()
             Rules.log("peers: sharing turned \(a[1]) from another Mac"); print("sharing \(a[1])"); return 0
-        default: Rules.say("usage: RigWatch peer info | peer install HOST [--share] | peer share on|off | peer hold --platform android [--name N] [--session S] [--purpose P] [--minutes M] [--from HOST]"); return 2
+        default: Rules.say("usage: RigWatch peer info | peer refresh | peer install HOST [--share] | peer share on|off | peer hold --platform android [--name N] [--session S] [--purpose P] [--minutes M] [--from HOST]"); return 2
         }
     }
 
@@ -364,6 +417,10 @@ enum Peers {
         let dest = "Library/Caches/RigWatch/remote/\(me)/\((path as NSString).lastPathComponent)"
         let ssh = (["/usr/bin/ssh"] + sshOpts).joined(separator: " ")
         let t0 = Date()
+        var run = RemoteRun(host: host, mac: info.name, session: session, command: command, cwd: path, phase: "copying", since: t0,
+                            pid: getpid(), pidStart: ProcSampler.startTime(getpid()) ?? 0)
+        noteRun(run)
+        defer { noteRun(nil, removing: run.id) }
         _ = Sh.run("/usr/bin/ssh", sshOpts + [host, "mkdir -p " + Rules.quote(dest)], timeout: 20)
         // Build outputs stay behind; everything else, node_modules and Pods included, goes (only changes, after the first time).
         let sync = Sh.run("/usr/bin/rsync", ["-az", "--delete", "-e", ssh, "--exclude", "/build/", "--exclude", "DerivedData/", "--exclude", ".gradle/",
@@ -377,7 +434,10 @@ enum Peers {
         var args = ["run", "--dir", "~/" + dest, "--session", session, "--from", localName]
         if simulator { args.append("--simulator") }
         if emulator { args.append("--emulator") }
+        run.phase = "running"; noteRun(run)
+        let started = Date()
         let r = Sh.run("/usr/bin/ssh", sshOpts + ["-T", host, remote(args + ["--", command])], timeout: 4 * 3600)
+        run.phase = "copying back"; noteRun(run)
         var back: [String] = []
         for rel in artifacts {
             let local = path + "/" + rel
@@ -386,6 +446,10 @@ enum Peers {
             if Sh.run("/usr/bin/rsync", ["-az", "-e", ssh, host + ":" + dest + "/" + rel, (local as NSString).deletingLastPathComponent + "/"], timeout: 900).code == 0 { back.append(rel) }
         }
         Rules.log("peers: ran on \(host) for session \(session) (exit \(r.code)): \(command.prefix(120))")
+        let kind = Rules.classify(command) ?? (simulator ? "xcodebuild" : "gradle")
+        BuildHistory.add(BuildRecord(kind: kind, pool: Rules.pool(kind: kind, cmd: command), cwd: path, cmd: command, session: session,
+                                     queuedAt: t0, startedAt: started, endedAt: Date(), waited: started.timeIntervalSince(t0),
+                                     overflow: false, forced: false, releasedEarly: false, exit: r.code, host: "\(info.name) (\(host))"))
         let out = (r.out + (r.err.isEmpty ? "" : "\n" + r.err)).split(separator: "\n", omittingEmptySubsequences: false).suffix(150).joined(separator: "\n")
         return ["mac": "\(info.name) (\(host))", "busy_there_before": String(format: "%.2f", info.busy), "exit_code": r.code, "copied_worktree_in_s": Int(copied), "ran_in_s": Int(Date().timeIntervalSince(t0) - copied),
                 "artifacts_back": back, "output_tail": out]
