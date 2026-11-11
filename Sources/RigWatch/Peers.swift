@@ -85,6 +85,82 @@ enum Peers {
         return .online(info)
     }
 
+    // MARK: putting RigWatch on another Mac
+
+    /// The build number in a version like "1.9.0 (22)"; 0 when there is none.
+    static func build(_ version: String) -> Int {
+        guard let open = version.lastIndex(of: "("), let close = version.lastIndex(of: ")"), open < close else { return 0 }
+        return Int(version[version.index(after: open)..<close]) ?? 0
+    }
+
+    /// RigWatch there is missing, too old to answer, or older than this one.
+    static func needsInstall(_ st: Status?) -> Bool {
+        switch st {
+        case .noRigWatch: return true
+        case .online(let i): return AppCopy.ownBuild > 0 && build(i.version) < AppCopy.ownBuild
+        default: return false
+        }
+    }
+
+    /// The app bundle copied to other Macs: the one this process runs from, or the copy in ~/Applications.
+    static var ownApp: String? {
+        let me = Bundle.main.bundleURL.resolvingSymlinksInPath().path
+        if me.hasSuffix(".app") { return me }
+        return FileManager.default.fileExists(atPath: AppCopy.copy + "/Contents/MacOS/RigWatch") ? AppCopy.copy : nil
+    }
+
+    /// Copies this Mac's RigWatch to ~/Applications there over SSH, so it needs no Homebrew, compiler or network
+    /// of its own. A RigWatch open there is restarted on the new one. With `share`, sharing is turned on there.
+    /// Returns what RigWatch there reports afterwards.
+    static func install(on host: String, share: Bool) throws -> PeerInfo {
+        guard let app = ownApp else { throw DeviceManager.Failure(message: "This RigWatch doesn't run from an app bundle, so there is nothing to copy.") }
+        let check = Sh.run("/usr/bin/ssh", sshOpts + [host, "uname -m; sw_vers -productVersion"], timeout: 15)
+        guard check.code == 0 else { throw DeviceManager.Failure(message: "Could not reach \(host) over SSH: \(check.err.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))") }
+        let f = check.out.split(separator: "\n").map(String.init)
+        guard f.first == "arm64" else { throw DeviceManager.Failure(message: "\(host) is an \(f.first ?? "unknown") Mac; this RigWatch runs on Apple silicon only.") }
+        guard let major = f.dropFirst().first.flatMap({ Int($0.split(separator: ".").first ?? "") }), major >= 14 else {
+            throw DeviceManager.Failure(message: "\(host) runs macOS \(f.dropFirst().first ?? "?"); RigWatch needs macOS 14 or later.")
+        }
+        // Unpacked beside the old one, then swapped in, so a broken copy never replaces a working RigWatch.
+        let gui = "'RigWatch.app/Contents/MacOS/RigWatch$'"
+        let script = "set -e; D=\"$HOME/Applications\"; mkdir -p \"$D\"; T=$(mktemp -d \"$D/.rigwatch-XXXXXX\"); mkdir \"$T/RigWatch.app\"; "
+            + "tar -C \"$T/RigWatch.app\" -xf -; open=0; pgrep -f \(gui) >/dev/null && open=1; "
+            + "if [ $open = 1 ]; then pkill -f \(gui) || true; sleep 1; fi; "
+            + "rm -rf \"$D/RigWatch.app\"; mv \"$T/RigWatch.app\" \"$D/RigWatch.app\"; rmdir \"$T\"; "
+            + "if [ $open = 1 ]; then open \"$D/RigWatch.app\" || true; fi; echo RIGWATCH_INSTALLED"
+        let ssh = (["/usr/bin/ssh"] + sshOpts + [host]).map(Rules.quote).joined(separator: " ")
+        let copy = Sh.run("/bin/zsh", ["-c", "COPYFILE_DISABLE=1 /usr/bin/tar --no-mac-metadata -C \(Rules.quote(app)) -cf - . | \(ssh) \(Rules.quote(script))"], timeout: 300)
+        guard copy.code == 0, copy.out.contains("RIGWATCH_INSTALLED") else {
+            throw DeviceManager.Failure(message: "Could not copy RigWatch to \(host): \((copy.err.isEmpty ? copy.out : copy.err).trimmingCharacters(in: .whitespacesAndNewlines).prefix(240))")
+        }
+        if share {
+            let s = Sh.run("/usr/bin/ssh", sshOpts + [host, remote(["share", "on"])], timeout: 20)
+            guard s.code == 0 else { throw DeviceManager.Failure(message: "RigWatch is on \(host) now, but turning sharing on there failed: \((s.err.isEmpty ? s.out : s.err).prefix(200))") }
+        }
+        guard case .online(let info) = probe(host) else { throw DeviceManager.Failure(message: "RigWatch was copied to \(host) but doesn't answer there.") }
+        Rules.log("peers: installed RigWatch \(info.version) on \(host)\(share ? ", sharing on" : "")")
+        return info
+    }
+
+    /// An allowed Mac, made ready to use: a missing or older RigWatch there is installed from this Mac first (a
+    /// missing one with sharing turned on, since allowing that Mac was the go-ahead). A failed install is not
+    /// tried again for ten minutes.
+    static func ready(_ host: String) -> Status {
+        let st = probe(host)
+        guard needsInstall(st) else { return st }
+        installLock.lock()
+        let recent = installFailed[host].map { Date().timeIntervalSince($0) < 600 } ?? false
+        installLock.unlock()
+        if recent { return st }
+        do { return .online(try install(on: host, share: st == .noRigWatch)) } catch let f as DeviceManager.Failure {
+            Rules.log("peers: could not install RigWatch on \(host): \(f.message)")
+            installLock.lock(); installFailed[host] = Date(); installLock.unlock()
+        } catch {}
+        return st
+    }
+    private static var installFailed: [String: Date] = [:]
+    private static let installLock = NSLock()
+
     // MARK: on the Mac being used
 
     /// `RigWatch peer info|hold ...`, run by another Mac over SSH.
@@ -93,7 +169,13 @@ enum Peers {
         case "info": print(String(decoding: (try? JSONEncoder().encode(info())) ?? Data(), as: UTF8.self)); return 0
         case "hold": return hold(Array(a.dropFirst()))
         case "run": return run(Array(a.dropFirst()))
-        default: Rules.say("usage: RigWatch peer info | peer hold --platform android [--name N] [--session S] [--purpose P] [--minutes M] [--from HOST]"); return 2
+        case "install" where a.count >= 2:
+            do { let i = try install(on: a[1], share: a.contains("--share")); print("RigWatch \(i.version) on \(i.name), sharing \(i.sharing ? "on" : "off")"); return 0 }
+            catch let f as DeviceManager.Failure { Rules.say(f.message); return 1 } catch { Rules.say("\(error)"); return 1 }
+        case "share" where a.count == 2 && ["on", "off"].contains(a[1]):
+            var s = RuleSettings.load(); s.shareDevices = a[1] == "on"; s.save()
+            Rules.log("peers: sharing turned \(a[1]) from another Mac"); print("sharing \(a[1])"); return 0
+        default: Rules.say("usage: RigWatch peer info | peer install HOST [--share] | peer share on|off | peer hold --platform android [--name N] [--session S] [--purpose P] [--minutes M] [--from HOST]"); return 2
         }
     }
 
@@ -179,7 +261,7 @@ enum Peers {
         let allowed = load().filter(\.allowed).filter { want == nil || $0.host == want }
         guard !allowed.isEmpty else { throw DeviceManager.Failure(message: want.map { "\($0) is not an allowed Mac (Device Manager page)." } ?? "No other Mac is allowed (Device Manager page).") }
         var ranked: [(Peer, PeerInfo)] = []
-        for p in allowed { if case .online(let i) = probe(p.host), i.sharing, i.xcode || !simulator { ranked.append((p, i)) } }
+        for p in allowed { if case .online(let i) = ready(p.host), i.sharing, i.xcode || !simulator { ranked.append((p, i)) } }
         ranked.sort { ($0.1.pressure, $0.1.load / Double(max(1, $0.1.cores))) < ($1.1.pressure, $1.1.load / Double(max(1, $1.1.cores))) }
         guard let (peer, info) = ranked.first else { throw DeviceManager.Failure(message: "No allowed Mac is online, sharing\(simulator ? " and has Xcode" : "") right now.") }
         let host = peer.host
@@ -223,7 +305,7 @@ enum Peers {
         let allowed = load().filter(\.allowed)
         guard !allowed.isEmpty else { throw DeviceManager.Failure(message: "No other Mac is allowed (Device Manager page).") }
         var ranked: [(Peer, PeerInfo)] = []
-        for p in allowed { if case .online(let i) = probe(p.host), i.sharing, !i.avds.isEmpty || i.emulators.contains(where: \.free) { ranked.append((p, i)) } }
+        for p in allowed { if case .online(let i) = ready(p.host), i.sharing, !i.avds.isEmpty || i.emulators.contains(where: \.free) { ranked.append((p, i)) } }
         ranked.sort { ($0.1.pressure, $0.1.load / Double(max(1, $0.1.cores))) < ($1.1.pressure, $1.1.load / Double(max(1, $1.1.cores))) }
         guard !ranked.isEmpty else { throw DeviceManager.Failure(message: "No allowed Mac is online and sharing its emulators right now.") }
         var tried: [String] = []

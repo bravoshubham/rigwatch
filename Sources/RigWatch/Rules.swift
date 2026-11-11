@@ -951,6 +951,7 @@ enum CLI {
     RigWatch status                     what is running, queued and booted
     RigWatch mcp                        MCP server: agents acquire and release emulators, simulators and phones
     RigWatch peer info|hold|run         what another Mac's RigWatch uses to borrow this Mac's devices (over SSH)
+    RigWatch peer install HOST [--share]  copy this RigWatch to another Mac over SSH (and turn sharing on there)
     RigWatch version                    the version of this RigWatch
     RigWatch install|uninstall          turn the rules on or off (Claude Code hook, MCP device manager, clean-up agent)
     """

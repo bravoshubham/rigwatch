@@ -162,7 +162,7 @@ final class Monitor: ObservableObject {
             if history.isEmpty { history = Demo.history() }
             servers = Demo.servers(tick); sessions = Self.attach(servers, to: Demo.sessions(tick))
             if worktrees.isEmpty { worktrees = Demo.worktrees() }
-            leases = Demo.leases(); jobs = Demo.jobs(); outside = Demo.outside(); governed = Set(outside.map(\.pid))
+            leases = Demo.leases(); peerRows = Demo.peers(); jobs = Demo.jobs(); outside = Demo.outside(); governed = Set(outside.map(\.pid))
             if buildHistory.isEmpty { buildHistory = Demo.buildHistory() }
             if bootable == nil { bootable = Demo.bootable() }
             selfCPU = 0.5; selfMem = 140 << 20
@@ -662,7 +662,8 @@ final class Monitor: ObservableObject {
             for i in box.rows.indices {
                 g.enter()
                 DispatchQueue.global(qos: .utility).async {
-                    let st = Peers.probe(box.rows[i].host)
+                    // An allowed Mac gets a missing or older RigWatch installed from here, as when an agent uses it.
+                    let st = box.rows[i].allowed ? Peers.ready(box.rows[i].host) : Peers.probe(box.rows[i].host)
                     box.lock.lock(); box.rows[i].status = st; box.lock.unlock(); g.leave()
                 }
             }
@@ -678,12 +679,49 @@ final class Monitor: ObservableObject {
             return
         }
         let name: String = { if case .online(let i) = r.status { return i.name }; return r.host }()
-        var msg = "Agents on this Mac may then be given emulators on \(name): RigWatch takes a free one or boots one there, and tunnels its adb port here over SSH. The apps the agents build here, company code included, are installed and run on \(name).\n\nAllow only a Mac that may hold that work."
-        msg += "\n\n\(name) must also share its emulators (Device Manager page there). Disallow any time."
-        pending = Pending(title: "Allow \(r.host)?", message: msg, button: "Allow") {
+        var msg = "Agents on this Mac may then be given emulators on \(name): RigWatch takes a free one or boots one there, and tunnels its adb port here over SSH. iOS builds and tests may run there too. The apps the agents build here, company code included, are installed and run on \(name).\n\nAllow only a Mac that may hold that work."
+        let install = Peers.needsInstall(r.status), missing = r.status == .noRigWatch
+        if install {
+            msg += "\n\nRigWatch \(AppCopy.ownVersion) is copied from this Mac to ~/Applications on \(name) over SSH\(missing ? ", and sharing is turned on there" : ""). Later versions follow by themselves."
+        } else if case .online(let i) = r.status, !i.sharing {
+            msg += "\n\n\(name) must also share its emulators (Device Manager page there, or Turn On Sharing here)."
+        }
+        msg += " Disallow any time."
+        pending = Pending(title: "Allow \(r.host)?", message: msg, button: install ? "Install and Allow" : "Allow") {
             Peers.setAllowed(r.host, true)
-            DispatchQueue.main.async { self.loadPeers(force: true) }
-            return "Agents here may now be given emulators on \(r.host) when it shares them."
+            defer { DispatchQueue.main.async { self.loadPeers(force: true) } }
+            guard install else { return "Agents here may now be given emulators on \(r.host) when it shares them." }
+            do {
+                let i = try Peers.install(on: r.host, share: missing)
+                return "RigWatch \(i.version) is on \(i.name), \(i.sharing ? "sharing its devices" : "not sharing its devices yet"). Agents here may now use it."
+            } catch let f as DeviceManager.Failure {
+                return "\(r.host) is allowed, but RigWatch could not be installed there: \(f.message)"
+            } catch { return "\(r.host) is allowed, but the install failed: \(error)" }
+        }
+    }
+
+    /// Installs or updates RigWatch on another Mac from this one.
+    func confirmInstallPeer(_ r: PeerRow) {
+        let missing = r.status == .noRigWatch
+        let verb = missing ? "Install" : "Update"
+        var msg = "Copies RigWatch \(AppCopy.ownVersion) from this Mac to ~/Applications on \(r.host) over SSH. If RigWatch is open there, it restarts on the new version."
+        if missing { msg += "\n\nSharing is turned on there too, so Macs that allow \(r.host) can use its emulators and simulators." }
+        pending = Pending(title: "\(verb) RigWatch on \(r.host)?", message: msg, button: verb) {
+            defer { DispatchQueue.main.async { self.loadPeers(force: true) } }
+            do {
+                let i = try Peers.install(on: r.host, share: missing)
+                return "RigWatch \(i.version) is on \(i.name), \(i.sharing ? "sharing its devices" : "not sharing its devices")."
+            } catch let f as DeviceManager.Failure { return f.message } catch { return "\(error)" }
+        }
+    }
+
+    /// Turns sharing on in RigWatch on another Mac, over SSH.
+    func confirmSharePeer(_ r: PeerRow) {
+        let name: String = { if case .online(let i) = r.status { return i.name }; return r.host }()
+        pending = Pending(title: "Turn on sharing on \(name)?", message: "Macs that allow \(name) may then take a free emulator there or boot one, and run builds and tests on its simulators. The limits on its Rules page still apply.", button: "Turn On Sharing") {
+            defer { DispatchQueue.main.async { self.loadPeers(force: true) } }
+            let s = Sh.run("/usr/bin/ssh", Peers.sshOpts + [r.host, Peers.remote(["share", "on"])], timeout: 20)
+            return s.code == 0 ? "\(name) now shares its devices." : "Could not turn sharing on there: \((s.err.isEmpty ? s.out : s.err).prefix(200))"
         }
     }
 

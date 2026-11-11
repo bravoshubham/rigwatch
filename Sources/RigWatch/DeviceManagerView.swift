@@ -209,6 +209,12 @@ struct DeviceManagerView: View {
             if case .online(let i) = r.status {
                 Chip(text: i.sharing ? "SHARING" : "NOT SHARING", color: i.sharing ? Color(hex: 0x3DDC97) : Aspect.process.color).fixedSize()
             }
+            if Peers.needsInstall(r.status) {
+                Button(r.status == .noRigWatch ? "Install RigWatch" : "Update RigWatch") { m.confirmInstallPeer(r) }
+                    .buttonStyle(HUDButton(color: Aspect.process.color)).disabled(m.working.contains { $0.hasSuffix("RigWatch on \(r.host)") })
+            } else if case .online(let i) = r.status, !i.sharing {
+                Button("Turn On Sharing") { m.confirmSharePeer(r) }.buttonStyle(HUDButton(color: Aspect.process.color))
+            }
             if r.allowed {
                 Chip(text: "ALLOWED", icon: "checkmark", color: Color(hex: 0x3DDC97), filled: true).fixedSize()
                 Button("Disallow") { m.confirmAllowPeer(r, false) }.buttonStyle(HUDButton(color: Color(hex: 0xFF4D5E)))
@@ -221,7 +227,7 @@ struct DeviceManagerView: View {
     func peerStatus(_ st: Peers.Status?) -> String {
         switch st {
         case nil: return "checking…"
-        case .noRigWatch: return "reachable over SSH; RigWatch there is missing or older than 1.9"
+        case .noRigWatch: return "reachable over SSH; RigWatch there is missing or older than 1.9 (Install RigWatch puts it there)"
         case .unreachable(let why): return "not reachable: \(why)"
         case .online(let i):
             let free = i.emulators.filter(\.free).count

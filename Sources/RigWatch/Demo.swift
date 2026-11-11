@@ -195,6 +195,17 @@ enum Demo {
                since: ago(600), until: now.addingTimeInterval(Leases.renewOnUse - 140), implicit: true)]
     }
 
+    static func peers() -> [Monitor.PeerRow] {
+        let v = AppCopy.ownVersion == "dev" ? "1.9.0 (22)" : AppCopy.ownVersion
+        func info(_ name: String, _ version: String, sharing: Bool, cores: Int, mem: Double, load: Double, emus: [PeerDevice], avds: [String]) -> PeerInfo {
+            PeerInfo(name: name, version: version, sharing: sharing, cores: cores, memGB: mem, pressure: 1, load: load, emulators: emus, simulators: [], avds: avds, xcode: true)
+        }
+        return [.init(host: "studio", allowed: true, status: .online(info("Studio", v, sharing: true, cores: 24, mem: 192, load: 6,
+                      emus: [PeerDevice(id: "emulator-5556", name: "Pixel_8_API_35", free: true)], avds: ["Pixel_8_API_35", "Pixel_Tablet_API_34"]))),
+                .init(host: "macmini", allowed: false, status: .online(info("Mac mini", v, sharing: false, cores: 10, mem: 16, load: 2, emus: [], avds: []))),
+                .init(host: "build-mbp", allowed: false, status: .noRigWatch)]
+    }
+
     static func bootable() -> (avds: [String], sims: [DeviceManager.Sim]) {
         let v = [18, 2]
         return (["Pixel_8_API_35", "Pixel_Tablet_API_34", "Pixel_Fold_API_35", "Medium_Phone_API_35"],
