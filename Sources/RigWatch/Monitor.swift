@@ -154,6 +154,8 @@ final class Monitor: ObservableObject {
     }
 
     func refresh(visible: Bool = true, worktreesNow: Bool = false) {
+        // Keeps the other Macs' load fresh for the hook's offload hint and for agents, page open or not.
+        if !Demo.on, Date().timeIntervalSince(peersAt) > 60, Peers.load().contains(where: \.allowed) { loadPeers() }
         guard !running else { return }
         if Demo.on {
             let ps = Demo.procs(tick)

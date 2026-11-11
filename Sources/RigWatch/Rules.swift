@@ -336,6 +336,12 @@ enum Rules {
             o["additionalContext"] = [o["additionalContext"] as? String, note].compactMap { $0 }.joined(separator: "\n\n")
             out = o
         }
+        // Spreading the load: a heavy build while this Mac is busy and another Mac is free.
+        if out?["permissionDecision"] == nil, tool == "Bash", let kind = classify(text), let hint = Peers.offloadHint(text, kind: kind, session: j["session_id"] as? String) {
+            var o = out ?? ["hookEventName": "PreToolUse"]
+            o["additionalContext"] = [o["additionalContext"] as? String, hint].compactMap { $0 }.joined(separator: "\n\n")
+            out = o
+        }
         if let out { emit(["hookSpecificOutput": out]) }
     }
 

@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import IOKit
 
 /// Other Macs whose emulators this Mac's agents may use, to spread the load. Each runs RigWatch; this Mac talks
 /// to it over SSH (`RigWatch peer info`, `RigWatch peer hold`). Using another Mac takes consent on both sides:
@@ -23,11 +24,90 @@ struct PeerInfo: Codable, Equatable {
     var simulators: [PeerDevice]
     var avds: [String]
     var xcode: Bool
+    var gpu: Int?                  // GPU busy %, from RigWatch 1.10
+    var busy: Double { Peers.busy(pressure: pressure, load: load, cores: cores, gpu: gpu ?? 0) }
 }
 struct PeerDevice: Codable, Equatable { var id: String, name: String, free: Bool }
 
 enum Peers {
     static let file = Rules.dir + "/peers.json"
+
+    // MARK: how busy a Mac is
+
+    /// 0 when idle, about 1 when the CPU (1-minute load per core) or the GPU is flat out; memory pressure adds
+    /// 0.5 (warning) or 1 (critical). Offloading needs another Mac at least `margin` less busy, so a near tie
+    /// doesn't send work back and forth.
+    static func busy(pressure: Int32, load: Double, cores: Int, gpu: Int) -> Double {
+        max(load / Double(max(1, cores)), Double(gpu) / 100) + (pressure >= 4 ? 1 : pressure >= 2 ? 0.5 : 0)
+    }
+    static let margin = 0.25
+    /// This Mac is busy enough that its work should go to a clearly less busy Mac if one can take it.
+    static let busyAt = 0.85
+
+    static func gpuNow() -> Int {
+        let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOAccelerator"))
+        defer { IOObjectRelease(svc) }
+        let st = IORegistryEntryCreateCFProperty(svc, "PerformanceStatistics" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any]
+        return st?["Device Utilization %"] as? Int ?? 0
+    }
+
+    static func here() -> (busy: Double, pressure: Int32, cpu: Int, gpu: Int) {
+        var l = [Double](repeating: 0, count: 3); getloadavg(&l, 3)
+        let cores = ProcessInfo.processInfo.activeProcessorCount, p = Rules.pressure(), g = gpuNow()
+        // RIGWATCH_BUSY_HERE stands in for this Mac's load (used to test offloading on one Mac).
+        let forced = ProcessInfo.processInfo.environment["RIGWATCH_BUSY_HERE"].flatMap(Double.init)
+        return (forced ?? busy(pressure: p, load: l[0], cores: cores, gpu: g), p, Int(100 * l[0] / Double(max(1, cores))), g)
+    }
+    static func hereIsBusy(_ h: (busy: Double, pressure: Int32, cpu: Int, gpu: Int)) -> Bool { h.pressure >= 2 || h.busy >= busyAt }
+
+    /// What the last check of each Mac found, so the hook can tell without asking over SSH.
+    struct Seen: Codable { var at: Date; var info: PeerInfo }
+    static let seenFile = Rules.dir + "/peer-status.json"
+    static func seen() -> [String: Seen] {
+        FileManager.default.contents(atPath: seenFile).flatMap { try? Leases.decoder.decode([String: Seen].self, from: $0) } ?? [:]
+    }
+    private static let seenLock = NSLock()
+    static func remember(_ host: String, _ info: PeerInfo?) {
+        seenLock.lock(); defer { seenLock.unlock() }
+        var all = seen()
+        all[host] = info.map { Seen(at: Date(), info: $0) }
+        Rules.write(try? Leases.encoder.encode(all), to: seenFile)
+    }
+
+    /// Load here and on the allowed Macs, as last seen (for build_queue).
+    static func loadReport() -> String {
+        let h = here(), seen = seen()
+        var lines = ["load here: busy \(String(format: "%.2f", h.busy)) (CPU \(h.cpu)% of cores, GPU \(h.gpu)%, memory pressure \(Views.pressureName(h.pressure).lowercased()))\(hereIsBusy(h) ? " - busy: prefer run_on_mac for heavy builds and tests" : "")"]
+        for p in load() where p.allowed {
+            guard let s = seen[p.host], Date().timeIntervalSince(s.at) < 600 else { lines.append("\(p.host): not checked lately"); continue }
+            let i = s.info
+            lines.append("\(p.host) (\(i.name)): busy \(String(format: "%.2f", i.busy)), \(i.sharing ? "sharing" : "not sharing"), \(i.emulators.filter(\.free).count) free emulators, \(i.avds.count) AVDs\(i.xcode ? ", Xcode" : ""), checked \(Int(Date().timeIntervalSince(s.at) / 60)) min ago")
+        }
+        if lines.count == 1 { lines.append("other Macs: none allowed") }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Said to a session about to run a heavy build here while this Mac is busy and an allowed Mac is clearly less
+    /// busy (as last seen), at most every 15 minutes per session.
+    static func offloadHint(_ cmd: String, kind: String, session: String?) -> String? {
+        guard let session, !session.isEmpty, kind == "gradle" || kind == "xcodebuild" else { return nil }
+        let h = here()
+        guard hereIsBusy(h) else { return nil }
+        let ios = kind == "xcodebuild"
+        let best = load().filter(\.allowed).compactMap { p -> (String, PeerInfo)? in
+            guard let s = seen()[p.host], Date().timeIntervalSince(s.at) < 300, s.info.sharing, s.info.busy <= h.busy - margin, !ios || s.info.xcode else { return nil }
+            return (p.host, s.info)
+        }.min { $0.1.busy < $1.1.busy }
+        guard let (host, info) = best else { return nil }
+        let file = Rules.dir + "/offload-hints.json"
+        var said = FileManager.default.contents(atPath: file).flatMap { try? Leases.decoder.decode([String: Date].self, from: $0) } ?? [:]
+        if let last = said[session], Date().timeIntervalSince(last) < 900 { return nil }
+        said = said.filter { Date().timeIntervalSince($0.value) < 86400 }; said[session] = Date()
+        Rules.write(try? Leases.encoder.encode(said), to: file)
+        return "RigWatch: this Mac is busy (CPU \(h.cpu)% of cores, GPU \(h.gpu)%, memory pressure \(Views.pressureName(h.pressure).lowercased())), and \(info.name) (\(host)) is much less busy. "
+            + "This command still runs here. For the next heavy \(ios ? "xcodebuild" : "Gradle") build or device test, consider the rigwatch MCP tool run_on_mac with host \(host): "
+            + "it runs the command there with \(ios ? "a simulator ($RIGWATCH_SIM_UDID)" : "an emulator (ANDROID_SERIAL)") of its own and copies back the result files you list in artifacts."
+    }
 
     static func load() -> [Peer] { FileManager.default.contents(atPath: file).flatMap { try? JSONDecoder().decode([Peer].self, from: $0) } ?? [] }
     static func save(_ p: [Peer]) { Rules.write(try? JSONEncoder().encode(p), to: file) }
@@ -82,6 +162,7 @@ enum Peers {
         guard r.code == 0, let line = r.out.split(separator: "\n").last, let info = try? JSONDecoder().decode(PeerInfo.self, from: Data(line.utf8)) else {
             return r.out.contains("peer") || r.err.contains("not found") || r.code == 127 ? .noRigWatch : .unreachable((r.err.isEmpty ? r.out : r.err).prefix(160).trimmingCharacters(in: .whitespacesAndNewlines))
         }
+        remember(host, info)
         return .online(info)
     }
 
@@ -186,7 +267,7 @@ enum Peers {
         return PeerInfo(name: localName, version: AppCopy.ownVersion, sharing: s.shareDevices, cores: ProcessInfo.processInfo.activeProcessorCount,
                         memGB: Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824, pressure: Rules.pressure(), load: l[0],
                         emulators: devs.filter { $0.kind == .emulator }.map(row), simulators: devs.filter { $0.kind == .simulator }.map(row),
-                        avds: DeviceManager.avds(), xcode: FileManager.default.fileExists(atPath: "/Applications/Xcode.app"))
+                        avds: DeviceManager.avds(), xcode: FileManager.default.fileExists(atPath: "/Applications/Xcode.app"), gpu: gpuNow())
     }
 
     /// Leases an emulator here for an agent on another Mac and keeps it until that Mac hangs up (stdin closes).
@@ -237,33 +318,47 @@ enum Peers {
         let dir = (dirArg as NSString).expandingTildeInPath, cmd = a[(sep + 1)...].joined(separator: " ")
         let from = arg("--from") ?? "another Mac"
         setenv("CLAUDE_CODE_SESSION_ID", "\(from)/\(arg("--session") ?? "agent")", 1)
-        var sim: String?
-        if a.contains("--simulator") {
+        // A simulator (iOS) or an emulator (Android) of this Mac's own for the run, shut down afterwards if booted for it.
+        var leased: [String] = []
+        defer { for id in leased { _ = try? DeviceManager.release(id, shutdown: nil) } }
+        for (flag, platform, kind, env) in [("--simulator", "ios", "simulator", "RIGWATCH_SIM_UDID"), ("--emulator", "android", "emulator", "ANDROID_SERIAL")] where a.contains(flag) {
             do {
-                let g = try DeviceManager.acquire(platform: "ios", want: arg("--name"), minutes: 120, purpose: "build from \(from)", headless: true, virtualOnly: true, where: "local")
-                sim = g["id"] as? String
-                Rules.say("RigWatch on \(localName): simulator \(g["name"] ?? "") \(sim ?? "") for this run")
-            } catch let f as DeviceManager.Failure { Rules.say("RigWatch on \(localName): no simulator: \(f.message)"); return 1 } catch { return 1 }
+                let g = try DeviceManager.acquire(platform: platform, want: arg("--name"), minutes: 120, purpose: "build from \(from)", headless: true, virtualOnly: true, where: "local")
+                guard let id = g["id"] as? String else { return 1 }
+                leased.append(id); setenv(env, id, 1)
+                Rules.say("RigWatch on \(localName): \(kind) \(g["name"] ?? "") \(id) for this run (\(env))")
+            } catch let f as DeviceManager.Failure { Rules.say("RigWatch on \(localName): no \(kind): \(f.message)"); return 1 } catch { return 1 }
         }
-        defer { if let sim { _ = try? DeviceManager.release(sim, shutdown: nil) } }
-        if let sim { setenv("RIGWATCH_SIM_UDID", sim, 1) }
         guard FileManager.default.changeCurrentDirectoryPath(dir) else { Rules.say("RigWatch on \(localName): no folder \(dir)"); return 1 }
+        fixSdkDir(dir)
         // Through this Mac's own queue, so a build from another Mac waits its turn like any other.
         let kind = Rules.classify(cmd) ?? "xcodebuild"
         return Rules.run(["--kind", kind, "--", "/bin/zsh", "-lc", cmd])
+    }
+
+    /// local.properties came from the other Mac: its sdk.dir points at that Mac's Android SDK. Point it at this one's.
+    static func fixSdkDir(_ dir: String) {
+        let f = dir + "/local.properties"
+        guard let text = try? String(contentsOfFile: f, encoding: .utf8), let sdk = DeviceManager.sdkRoot else { return }
+        var changed = false
+        let lines = text.components(separatedBy: "\n").map { line -> String in
+            guard line.hasPrefix("sdk.dir="), !FileManager.default.fileExists(atPath: String(line.dropFirst(8))) else { return line }
+            changed = true; return "sdk.dir=" + sdk
+        }
+        if changed { try? lines.joined(separator: "\n").write(toFile: f, atomically: true, encoding: .utf8) }
     }
 
     // MARK: on the Mac using it
 
     /// Copies a worktree to an allowed Mac, runs a command there (with a simulator of its own if asked) and copies
     /// result files back. Returns the exit code, the end of the output and what came back.
-    static func runRemote(path: String, command: String, host want: String?, simulator: Bool, artifacts: [String], session: String) throws -> [String: Any] {
+    static func runRemote(path: String, command: String, host want: String?, simulator: Bool, emulator: Bool = false, artifacts: [String], session: String) throws -> [String: Any] {
         let allowed = load().filter(\.allowed).filter { want == nil || $0.host == want }
         guard !allowed.isEmpty else { throw DeviceManager.Failure(message: want.map { "\($0) is not an allowed Mac (Device Manager page)." } ?? "No other Mac is allowed (Device Manager page).") }
         var ranked: [(Peer, PeerInfo)] = []
-        for p in allowed { if case .online(let i) = ready(p.host), i.sharing, i.xcode || !simulator { ranked.append((p, i)) } }
-        ranked.sort { ($0.1.pressure, $0.1.load / Double(max(1, $0.1.cores))) < ($1.1.pressure, $1.1.load / Double(max(1, $1.1.cores))) }
-        guard let (peer, info) = ranked.first else { throw DeviceManager.Failure(message: "No allowed Mac is online, sharing\(simulator ? " and has Xcode" : "") right now.") }
+        for p in allowed { if case .online(let i) = ready(p.host), i.sharing, i.xcode || !simulator, !emulator || !i.avds.isEmpty || i.emulators.contains(where: \.free) { ranked.append((p, i)) } }
+        ranked.sort { $0.1.busy < $1.1.busy }
+        guard let (peer, info) = ranked.first else { throw DeviceManager.Failure(message: "No allowed Mac is online, sharing\(simulator ? " and has Xcode" : "")\(emulator ? " and has an Android emulator" : "") right now.") }
         let host = peer.host
         let me = localName.replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "-", options: .regularExpression)
         let dest = "Library/Caches/RigWatch/remote/\(me)/\((path as NSString).lastPathComponent)"
@@ -281,6 +376,7 @@ enum Peers {
         }
         var args = ["run", "--dir", "~/" + dest, "--session", session, "--from", localName]
         if simulator { args.append("--simulator") }
+        if emulator { args.append("--emulator") }
         let r = Sh.run("/usr/bin/ssh", sshOpts + ["-T", host, remote(args + ["--", command])], timeout: 4 * 3600)
         var back: [String] = []
         for rel in artifacts {
@@ -291,7 +387,7 @@ enum Peers {
         }
         Rules.log("peers: ran on \(host) for session \(session) (exit \(r.code)): \(command.prefix(120))")
         let out = (r.out + (r.err.isEmpty ? "" : "\n" + r.err)).split(separator: "\n", omittingEmptySubsequences: false).suffix(150).joined(separator: "\n")
-        return ["mac": "\(info.name) (\(host))", "exit_code": r.code, "copied_worktree_in_s": Int(copied), "ran_in_s": Int(Date().timeIntervalSince(t0) - copied),
+        return ["mac": "\(info.name) (\(host))", "busy_there_before": String(format: "%.2f", info.busy), "exit_code": r.code, "copied_worktree_in_s": Int(copied), "ran_in_s": Int(Date().timeIntervalSince(t0) - copied),
                 "artifacts_back": back, "output_tail": out]
     }
 
@@ -301,13 +397,14 @@ enum Peers {
 
     /// Leases an emulator on the least busy allowed Mac and tunnels its adb port here. The returned device id is
     /// an adb serial on this Mac ("127.0.0.1:PORT").
-    static func acquireRemote(want: String?, minutes: Int, purpose: String, session: String) throws -> (id: String, name: String, host: String, booted: Bool) {
+    /// With `below`, only a Mac at least `margin` less busy than that counts (offloading from a busy Mac).
+    static func acquireRemote(want: String?, minutes: Int, purpose: String, session: String, below: Double? = nil) throws -> (id: String, name: String, host: String, booted: Bool) {
         let allowed = load().filter(\.allowed)
         guard !allowed.isEmpty else { throw DeviceManager.Failure(message: "No other Mac is allowed (Device Manager page).") }
         var ranked: [(Peer, PeerInfo)] = []
-        for p in allowed { if case .online(let i) = ready(p.host), i.sharing, !i.avds.isEmpty || i.emulators.contains(where: \.free) { ranked.append((p, i)) } }
-        ranked.sort { ($0.1.pressure, $0.1.load / Double(max(1, $0.1.cores))) < ($1.1.pressure, $1.1.load / Double(max(1, $1.1.cores))) }
-        guard !ranked.isEmpty else { throw DeviceManager.Failure(message: "No allowed Mac is online and sharing its emulators right now.") }
+        for p in allowed { if case .online(let i) = ready(p.host), i.sharing, !i.avds.isEmpty || i.emulators.contains(where: \.free), below.map({ i.busy <= $0 - margin }) ?? true { ranked.append((p, i)) } }
+        ranked.sort { $0.1.busy < $1.1.busy }
+        guard !ranked.isEmpty else { throw DeviceManager.Failure(message: below == nil ? "No allowed Mac is online and sharing its emulators right now." : "No allowed Mac sharing its emulators is clearly less busy than this one right now.") }
         var tried: [String] = []
         for (p, _) in ranked {
             do { return try hold(on: p.host, want: want, minutes: minutes, purpose: purpose, session: session) }

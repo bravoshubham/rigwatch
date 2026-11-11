@@ -18,6 +18,9 @@ enum DeviceManager {
         return roots.map { $0 + "/emulator/emulator" }.first { FileManager.default.isExecutableFile(atPath: $0) }
     }()
 
+    /// The Android SDK the emulator came from.
+    static var sdkRoot: String? { emulatorPath.map { (($0 as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent } }
+
     // MARK: what exists
 
     static func running() -> [Device] { DeviceSampler().sample(procs: ProcSampler().sample(), deep: false).filter { $0.state == "device" || $0.kind == .simulator } }
@@ -146,10 +149,18 @@ enum DeviceManager {
             }
             throw f
         }
-        if case .bootAVD(let avd) = picked, place == "auto", !virtualOnly, s.preferPeers, Peers.load().contains(where: \.allowed),
-           let r = try? remote(want: want, minutes: minutes, purpose: purpose) {
-            Leases.edit { $0.removeAll { $0.device == "avd:" + avd && $0.session == me } }
-            return r
+        // Spreading the load: a new emulator boots on another Mac when that one is clearly less busy than this
+        // one (CPU, GPU, memory pressure). When this Mac is busy, even a free emulator here gives way to one
+        // there, since driving it adds load here too. A device asked for by name stays here.
+        if place == "auto", !virtualOnly, want == nil, s.preferPeers, platform == "android", Peers.load().contains(where: \.allowed) {
+            let h = Peers.here()
+            var leaseHere: String?
+            if case .bootAVD(let avd) = picked { leaseHere = "avd:" + avd }
+            if case .take(let d) = picked, d.kind != .phone, Peers.hereIsBusy(h) { leaseHere = d.id }
+            if let leaseHere, let r = try? remote(want: nil, minutes: minutes, purpose: purpose, below: h.busy) {
+                Leases.edit { $0.removeAll { $0.device == leaseHere && $0.session == me } }
+                return r
+            }
         }
         switch picked {
         case .have(let d, let l): return granted(d.id, d.name, platform, l.until, booted: false, note: "You already held this device; the lease is extended.")
@@ -178,15 +189,15 @@ enum DeviceManager {
     }
 
     /// An emulator on another allowed Mac, tunnelled here. Its lease is owned by this MCP server, which holds the tunnel.
-    static func remote(want: String?, minutes: Int, purpose: String) throws -> [String: Any] {
+    static func remote(want: String?, minutes: Int, purpose: String, below: Double? = nil) throws -> [String: Any] {
         let me = session, pid = getpid(), mins = min(max(minutes, 1), Leases.maxMinutes)
         let until = Date().addingTimeInterval(TimeInterval(mins * 60))
-        let r = try Peers.acquireRemote(want: want, minutes: mins, purpose: purpose, session: me)
+        let r = try Peers.acquireRemote(want: want, minutes: mins, purpose: purpose, session: me, below: below)
         Leases.edit { $0.append(Lease(device: r.id, name: r.name, platform: "android", session: me, ownerPid: pid, ownerStart: ProcSampler.startTime(pid) ?? 0,
                                        purpose: purpose, since: Date(), until: until, booted: r.booted, remote: r.host)) }
         Rules.log("lease: \(r.name) (\(r.id)) to session \(me) until \(Leases.time(until))\(purpose.isEmpty ? "" : ": " + purpose)")
         return granted(r.id, r.name, "android", until, booted: r.booted,
-                       note: "Runs on \(r.host) to spare this Mac, reached through an SSH tunnel: use it like any adb device (adb -s \(r.id)). Installs go over the network, so they are a little slower.")
+                       note: "Runs on \(r.host)\(below == nil ? "" : ", which is less busy than this Mac,") to spare this Mac, reached through an SSH tunnel: use it like any adb device (adb -s \(r.id)). Installs go over the network, so they are a little slower.")
     }
 
     private static func granted(_ id: String, _ name: String, _ platform: String, _ until: Date, booted: Bool, note: String?) -> [String: Any] {
@@ -321,16 +332,17 @@ enum MCPServer {
              ["id": ["type": "string"], "minutes": ["type": "integer", "minimum": 1, "maximum": Leases.maxMinutes]], required: ["id"]),
         tool("release_device", "Give a device back when you are done. A device RigWatch booted for you is shut down unless shutdown is false; one that was already running keeps running.",
              ["id": ["type": "string"], "shutdown": ["type": "boolean"]], required: ["id"]),
-        tool("run_on_mac", "Run a build or test on another allowed Mac to spare this one, typically an iOS xcodebuild with a simulator there. Copies the worktree over (only changes after the first time), leases a simulator on that Mac when simulator is true (use -destination id=$RIGWATCH_SIM_UDID), runs the command in that Mac's build queue, then copies the listed result files back. Blocks until it finishes.",
-             ["command": ["type": "string", "description": "Shell command to run in the worktree there, e.g. xcodebuild -workspace App.xcworkspace -scheme App -destination id=$RIGWATCH_SIM_UDID test"],
+        tool("run_on_mac", "Run a heavy build or test on another allowed Mac to spare this one: an Android Gradle build or device test with an emulator there, or an iOS xcodebuild with a simulator there. Copies the worktree over (only changes after the first time), leases an emulator (ANDROID_SERIAL is set, so Gradle and adb use it) or a simulator (use -destination id=$RIGWATCH_SIM_UDID) on that Mac, runs the command in that Mac's build queue, then copies the listed result files back. Blocks until it finishes.",
+             ["command": ["type": "string", "description": "Shell command to run in the worktree there, e.g. ./gradlew connectedDebugAndroidTest, or xcodebuild -workspace App.xcworkspace -scheme App -destination id=$RIGWATCH_SIM_UDID test"],
               "path": ["type": "string", "description": "The worktree. Defaults to the current directory."],
               "host": ["type": "string", "description": "A specific allowed Mac. Omit to use the least busy one."],
-              "simulator": ["type": "boolean", "description": "Lease a simulator there for the run (default: true when the command runs xcodebuild)."],
-              "artifacts": ["type": "array", "items": ["type": "string"], "description": "Paths inside the worktree to copy back, e.g. build/test.xcresult or screenshots."]], required: ["command"]),
+              "simulator": ["type": "boolean", "description": "Lease an iOS simulator there for the run (default: true when the command runs xcodebuild)."],
+              "emulator": ["type": "boolean", "description": "Lease an Android emulator there for the run (default: true when the command runs a Gradle install or connected test task)."],
+              "artifacts": ["type": "array", "items": ["type": "string"], "description": "Paths inside the worktree to copy back, e.g. app/build/outputs/androidTest-results, app/build/outputs/apk, build/test.xcresult or screenshots."]], required: ["command"]),
         tool("prepare_worktree", "Prepare a new worktree before its first install or build: copies in node_modules, CocoaPods' Pods and Xcode's package and module caches from another worktree or RigWatch's store when they match this worktree's lockfiles (an APFS clone: seconds, no extra disk). The install afterwards only checks them. Builds and installs run through RigWatch do this on their own; call it to have it done up front.",
              ["path": ["type": "string", "description": "The worktree (or any folder in it). Defaults to the current directory."],
               "derived_data_path": ["type": "string", "description": "The -derivedDataPath your xcodebuild uses, if any, relative to the worktree."]], required: []),
-        tool("build_queue", "Show RigWatch's build queue: Android and iOS slots, running and waiting builds, and memory pressure.", [:], required: []),
+        tool("build_queue", "Show RigWatch's build queue: Android and iOS slots, running and waiting builds, memory pressure, and how busy this Mac and the other allowed Macs are.", [:], required: []),
     ]
 
     static func tool(_ name: String, _ desc: String, _ props: [String: Any], required: [String]) -> [String: Any] {
@@ -343,6 +355,17 @@ enum MCPServer {
     emulators or simulators yourself, and do not use a device leased to another session. In a new worktree, call \
     prepare_worktree before the first install or build: it copies in node_modules, Pods and Xcode caches that match \
     its lockfiles, so the first build isn't a cold one.
+
+    This Mac can share its load with other Macs the user allowed (Device Manager page). Two ways:
+    - acquire_device may hand you an Android emulator running on another Mac when this one is busy or full. Its id \
+    looks like 127.0.0.1:PORT (an SSH tunnel); use it like any adb device. Nothing else changes for you.
+    - run_on_mac moves a whole build or test to the least busy allowed Mac: it copies the worktree there, runs your \
+    command in that Mac's build queue with an emulator (Android: ANDROID_SERIAL is set) or a simulator (iOS: \
+    -destination id=$RIGWATCH_SIM_UDID) of its own, and copies back the result files you list. Use it for heavy \
+    Gradle or xcodebuild builds and device tests when RigWatch says this Mac is busy, or when build_queue shows \
+    another Mac much less busy. Results come back; outputs you don't list stay there, so to install an APK or app \
+    on a device here, build it here. The first run on a Mac is slower: its Gradle and Xcode caches start empty.
+    build_queue shows the load here and on the other Macs.
     """
 
     static func main() -> Int32 {
@@ -394,12 +417,13 @@ enum MCPServer {
             case "release_device":
                 guard let id = str("id") else { throw DeviceManager.Failure(message: "id is required") }
                 out = try DeviceManager.release(id, shutdown: a["shutdown"] as? Bool)
-            case "build_queue": out = Rules.status()
+            case "build_queue": out = Rules.status() + "\n" + Peers.loadReport()
             case "run_on_mac":
                 guard let cmd = str("command") else { throw DeviceManager.Failure(message: "command is required") }
                 let start = (str("path").map { ($0 as NSString).expandingTildeInPath }) ?? FileManager.default.currentDirectoryPath
                 guard let root = Rules.roots("", cwd: start).first else { throw DeviceManager.Failure(message: "\(start) is not inside a git worktree.") }
                 out = try Peers.runRemote(path: root, command: cmd, host: str("host"), simulator: a["simulator"] as? Bool ?? cmd.contains("xcodebuild"),
+                                          emulator: a["emulator"] as? Bool ?? Rules.has(Leases.gradleDevice, cmd),
                                           artifacts: (a["artifacts"] as? [String]) ?? [], session: DeviceManager.session)
             case "prepare_worktree":
                 let start = (str("path").map { ($0 as NSString).expandingTildeInPath }) ?? FileManager.default.currentDirectoryPath

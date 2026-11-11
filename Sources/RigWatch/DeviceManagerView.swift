@@ -231,7 +231,7 @@ struct DeviceManagerView: View {
         case .unreachable(let why): return "not reachable: \(why)"
         case .online(let i):
             let free = i.emulators.filter(\.free).count
-            return "\(i.name) · RigWatch \(i.version) · \(i.cores) cores · \(Int(i.memGB.rounded())) GB · \(Views.pressureName(i.pressure).lowercased()) pressure · load \(String(format: "%.0f", i.load)) · emulators \(free) free of \(i.emulators.count) · \(i.avds.count) AVDs\(i.xcode ? " · Xcode" : "")"
+            return "\(i.name) · RigWatch \(i.version) · \(i.cores) cores · \(Int(i.memGB.rounded())) GB · \(Views.pressureName(i.pressure).lowercased()) pressure · load \(String(format: "%.0f", i.load)) · emulators \(free) free of \(i.emulators.count) · \(i.avds.count) AVDs\(i.xcode ? " · Xcode" : "")\(i.gpu.map { " · GPU \($0)%" } ?? "")"
         }
     }
 
