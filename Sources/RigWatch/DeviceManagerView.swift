@@ -204,6 +204,9 @@ struct DeviceManagerView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(r.host).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
                 Text(peerStatus(r.status)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2)
+                if let f = Peers.failures()[r.host], Date().timeIntervalSince(f.at) < 3600 {
+                    Text("LAST TRY FAILED \(Int(Date().timeIntervalSince(f.at) / 60)) MIN AGO: \(f.why)").font(.system(size: 10.5, weight: .semibold, design: .monospaced)).foregroundStyle(Color(hex: 0xFF4D5E)).lineLimit(2)
+                }
                 if let use = peerUse(r.host) { Text(use).font(.system(size: 10.5, weight: .semibold, design: .monospaced)).foregroundStyle(Aspect.android.color).lineLimit(2) }
             }
             Spacer(minLength: 8)

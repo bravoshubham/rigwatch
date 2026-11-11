@@ -396,8 +396,25 @@ enum MCPServer {
             case "tools/call": reply(id, call(params["name"] as? String ?? "", params["arguments"] as? [String: Any] ?? [:]))
             default: send(["jsonrpc": "2.0", "id": id!, "error": ["code": -32601, "message": "Method not found: \(method)"]])
             }
+            restartIfUpdated()
         }
         return 0
+    }
+
+    /// A session keeps its MCP server for as long as it lives, so after an upgrade it would go on running the old
+    /// RigWatch. Between requests, a server whose app on disk is newer starts the new one in its place (same
+    /// process, same pipes). Not while it holds an emulator on another Mac (its SSH connection is the hold), nor
+    /// with input already waiting.
+    static func restartIfUpdated() {
+        let plist = Bundle.main.bundlePath + "/Contents/Info.plist"
+        guard AppCopy.ownBuild > 0, !Peers.holding,
+              let b = (NSDictionary(contentsOfFile: plist)?["CFBundleVersion"] as? String).flatMap(Int.init), b > AppCopy.ownBuild,
+              let exe = Bundle.main.executablePath, stdin.pointee._r <= 0 else { return }
+        Rules.log("mcp: session \(DeviceManager.session) moves from build \(AppCopy.ownBuild) to build \(b)")
+        fflush(stdout)
+        let argv: [UnsafeMutablePointer<CChar>?] = [strdup(exe), strdup("mcp"), nil]
+        execv(exe, argv)
+        Rules.log("mcp: could not start build \(b): errno \(errno)")   // only reached when execv failed
     }
 
     static func call(_ name: String, _ a: [String: Any]) -> [String: Any] {

@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import IOKit
+import CryptoKit
 
 /// Other Macs whose emulators this Mac's agents may use, to spread the load. Each runs RigWatch; this Mac talks
 /// to it over SSH (`RigWatch peer info`, `RigWatch peer hold`). Using another Mac takes consent on both sides:
@@ -114,6 +115,19 @@ enum Peers {
         return "RigWatch: this Mac is busy (CPU \(h.cpu)% of cores, GPU \(h.gpu)%, memory pressure \(Views.pressureName(h.pressure).lowercased())), and \(info.name) (\(host)) is much less busy. "
             + "This command still runs here. For the next heavy \(ios ? "xcodebuild" : "Gradle") build or device test, consider the rigwatch MCP tool run_on_mac with host \(host): "
             + "it runs the command there with \(ios ? "a simulator ($RIGWATCH_SIM_UDID)" : "an emulator (ANDROID_SERIAL)") of its own and copies back the result files you list in artifacts."
+    }
+
+    /// The last failed attempt to use each Mac's emulators (shown on the Device Manager page; skipped for 10 minutes).
+    struct Failure: Codable { var at: Date; var why: String }
+    static let failuresFile = Rules.dir + "/peer-failures.json"
+    static func failures() -> [String: Failure] {
+        FileManager.default.contents(atPath: failuresFile).flatMap { try? Leases.decoder.decode([String: Failure].self, from: $0) } ?? [:]
+    }
+    static func noteFailure(_ host: String, _ why: String?) {
+        var all = failures()
+        guard all[host] != nil || why != nil else { return }
+        all[host] = why.map { Failure(at: Date(), why: $0) }
+        Rules.write(try? Leases.encoder.encode(all), to: failuresFile)
     }
 
     // MARK: work this Mac has on other Macs
@@ -306,6 +320,7 @@ enum Peers {
             do { let i = try install(on: a[1], share: a.contains("--share")); print("RigWatch \(i.version) on \(i.name), sharing \(i.sharing ? "on" : "off")"); return 0 }
             catch let f as DeviceManager.Failure { Rules.say(f.message); return 1 } catch { Rules.say("\(error)"); return 1 }
         case "refresh": refreshAllowed(); return 0
+        case "authorize": return authorize(Array(a.dropFirst()))
         case "share" where a.count == 2 && ["on", "off"].contains(a[1]):
             var s = RuleSettings.load(); s.shareDevices = a[1] == "on"; s.save()
             Rules.log("peers: sharing turned \(a[1]) from another Mac"); print("sharing \(a[1])"); return 0
@@ -389,6 +404,54 @@ enum Peers {
         return Rules.run(["--kind", kind, "--", "/bin/zsh", "-lc", cmd])
     }
 
+    // MARK: letting the other Mac's adb in
+
+    /// The fingerprint Android shows for an adb public key ("QAAAA… user@host"): MD5 of the key, as AB:CD:….
+    static func adbFingerprint(_ pub: String) -> String? {
+        guard let b64 = pub.split(separator: " ").first, let raw = Data(base64Encoded: String(b64)) else { return nil }
+        return Insecure.MD5.hash(data: raw).map { String(format: "%02X", $0) }.joined(separator: ":")
+    }
+
+    /// `peer authorize --serial S --key PUB --from MAC`: an emulator here trusts only this Mac's adb key, so the
+    /// other Mac's adb gets "unauthorized" and Android asks "Allow USB debugging?" inside the emulator. This answers
+    /// it (Always allow) — only for an emulator leased here to that Mac, only while this Mac shares its devices, and
+    /// only when the fingerprint Android shows is the other Mac's key.
+    static func authorize(_ a: [String]) -> Int32 {
+        func arg(_ k: String) -> String? { a.firstIndex(of: k).flatMap { $0 + 1 < a.count ? a[$0 + 1] : nil } }
+        func fail(_ m: String) -> Int32 { Rules.say("RigWatch on \(localName): \(m)"); Rules.log("peers: did not let \(arg("--from") ?? "?") in: \(m)"); return 1 }
+        guard RuleSettings.load().shareDevices else { return fail("this Mac doesn't share its devices") }
+        guard let serial = arg("--serial"), serial.hasPrefix("emulator-"), let key = arg("--key"), let from = arg("--from"), let want = adbFingerprint(key) else {
+            return fail("usage: peer authorize --serial emulator-N --key PUBKEY --from MAC")
+        }
+        guard Leases.live().contains(where: { $0.device == serial && $0.session.hasPrefix(from + "/") }) else { return fail("\(serial) is not leased to \(from)") }
+        let adb = Sh.adb
+        for _ in 0..<10 {
+            _ = Sh.run(adb, ["-s", serial, "shell", "uiautomator", "dump", "/sdcard/rigwatch-ui.xml"], timeout: 20)
+            let xml = Sh.run(adb, ["-s", serial, "shell", "cat", "/sdcard/rigwatch-ui.xml"], timeout: 10).out
+            _ = Sh.run(adb, ["-s", serial, "shell", "rm", "-f", "/sdcard/rigwatch-ui.xml"], timeout: 10)
+            guard xml.contains("android:id/button1"), let shown = Rules.matches(fingerprint, xml).first else { usleep(1_000_000); continue }
+            guard shown == want else { return fail("the emulator asks about key \(shown), not \(from)'s (\(want)); left unanswered") }
+            if let box = node(xml, "android:id/alwaysUse"), !box.checked { _ = Sh.run(adb, ["-s", serial, "shell", "input", "tap", "\(box.x)", "\(box.y)"], timeout: 10) }
+            guard let ok = node(xml, "android:id/button1") else { return fail("no Allow button") }
+            _ = Sh.run(adb, ["-s", serial, "shell", "input", "tap", "\(ok.x)", "\(ok.y)"], timeout: 10)
+            Rules.log("peers: let \(from)'s adb (key \(want)) into \(serial)")
+            print("authorized"); return 0
+        }
+        return fail("no \"Allow USB debugging?\" prompt showed up on \(serial)")
+    }
+    static let fingerprint = try! NSRegularExpression(pattern: #"(?:[0-9A-F]{2}:){15}[0-9A-F]{2}"#)
+
+    /// The centre of a uiautomator node by resource id, and whether it is checked.
+    static func node(_ xml: String, _ id: String) -> (x: Int, y: Int, checked: Bool)? {
+        guard let r = xml.range(of: "resource-id=\"\(id)\"") else { return nil }
+        let start = xml[..<r.lowerBound].range(of: "<node", options: .backwards)?.lowerBound ?? r.lowerBound
+        let tag = xml[start...].prefix { $0 != ">" }
+        guard let b = tag.range(of: #"bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]""#, options: .regularExpression) else { return nil }
+        let n = tag[b].split { !$0.isNumber }.compactMap { Int($0) }
+        guard n.count == 4 else { return nil }
+        return ((n[0] + n[2]) / 2, (n[1] + n[3]) / 2, tag.contains("checked=\"true\""))
+    }
+
     /// local.properties came from the other Mac: its sdk.dir points at that Mac's Android SDK. Point it at this one's.
     static func fixSdkDir(_ dir: String) {
         let f = dir + "/local.properties"
@@ -457,6 +520,7 @@ enum Peers {
 
     /// The SSH connection that holds a remote emulator (its stdin is the hold) and its control socket.
     private static var holds: [String: (proc: Process, stdin: Pipe, control: String)] = [:]
+    static var holding: Bool { holdsLock.lock(); defer { holdsLock.unlock() }; return !holds.isEmpty }
     private static let holdsLock = NSLock()
 
     /// Leases an emulator on the least busy allowed Mac and tunnels its adb port here. The returned device id is
@@ -471,8 +535,14 @@ enum Peers {
         guard !ranked.isEmpty else { throw DeviceManager.Failure(message: below == nil ? "No allowed Mac is online and sharing its emulators right now." : "No allowed Mac sharing its emulators is clearly less busy than this one right now.") }
         var tried: [String] = []
         for (p, _) in ranked {
-            do { return try hold(on: p.host, want: want, minutes: minutes, purpose: purpose, session: session) }
-            catch let f as DeviceManager.Failure { tried.append("\(p.host): \(f.message)") }
+            if let f = failures()[p.host], Date().timeIntervalSince(f.at) < 600 { tried.append("\(p.host): skipped, it failed \(Int(Date().timeIntervalSince(f.at) / 60)) min ago (\(f.why))"); continue }
+            do { let r = try hold(on: p.host, want: want, minutes: minutes, purpose: purpose, session: session); noteFailure(p.host, nil); return r }
+            catch let f as DeviceManager.Failure {
+                tried.append("\(p.host): \(f.message)")
+                Rules.log("peers: could not use an emulator on \(p.host) for session \(session): \(f.message)")
+                // A Mac that can't lend (tunnel, adb, SSH) is skipped for 10 minutes; one that just has nothing free isn't.
+                if !f.message.contains("free") && !f.message.contains("leased") && !f.message.contains("doesn't share") { noteFailure(p.host, f.message) }
+            }
         }
         throw DeviceManager.Failure(message: "No allowed Mac could lend an emulator. " + tried.joined(separator: "; "))
     }
@@ -509,15 +579,37 @@ enum Peers {
         let serial = "127.0.0.1:\(local)"
         guard fwd.code == 0 else { p.terminate(); throw DeviceManager.Failure(message: "could not forward its adb port: \(fwd.err.prefix(160))") }
         _ = Sh.run(Sh.adb, ["connect", serial], timeout: 15)
-        var ready = false
+        var ready = false, asked = false, why = "adb could not reach \(id) through the tunnel"
         for _ in 0..<30 {
             if Sh.run(Sh.adb, ["-s", serial, "get-state"], timeout: 5).out.trimmingCharacters(in: .whitespacesAndNewlines) == "device" { ready = true; break }
+            // The emulator there trusts only that Mac's adb key: have that Mac let this one's key in, once (Android remembers it).
+            if !asked, adbState(serial) == "unauthorized" {
+                asked = true
+                guard let key = ownAdbKey() else { why = "\(id) there doesn't trust this Mac's adb, and this Mac has no adb key (~/.android/adbkey.pub)"; break }
+                let r = Sh.run("/usr/bin/ssh", ["-o", "ControlPath=\(control)", "-T", host, remote(["authorize", "--serial", id, "--key", key, "--from", localName])], timeout: 120)
+                guard r.code == 0 else { why = "\(id) there doesn't trust this Mac's adb: \((r.out + r.err).trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))"; break }
+                _ = Sh.run(Sh.adb, ["disconnect", serial], timeout: 5); _ = Sh.run(Sh.adb, ["connect", serial], timeout: 15)
+            }
             usleep(1_000_000)
         }
-        guard ready else { _ = Sh.run(Sh.adb, ["disconnect", serial], timeout: 5); p.terminate(); throw DeviceManager.Failure(message: "adb could not reach \(id) through the tunnel") }
+        guard ready else { _ = Sh.run(Sh.adb, ["disconnect", serial], timeout: 5); p.terminate(); throw DeviceManager.Failure(message: why) }
         holdsLock.lock(); holds[serial] = (p, inPipe, control); holdsLock.unlock()
         Rules.log("peers: \(id) on \(host) as \(serial) for session \(session)")
         return (serial, "\(j["name"] as? String ?? id) on \(host)", host, j["booted"] as? Bool ?? false)
+    }
+
+    /// adb's state for a device: device, unauthorized, offline, or nil when it isn't listed.
+    static func adbState(_ serial: String) -> String? {
+        for line in Sh.run(Sh.adb, ["devices"], timeout: 10).out.split(separator: "\n") {
+            let f = line.split(separator: "\t")
+            if f.count == 2, f[0] == serial { return String(f[1]) }
+        }
+        return nil
+    }
+    /// This Mac's adb public key (the base64 part), which an emulator on another Mac is asked to trust.
+    static func ownAdbKey() -> String? {
+        let dir = ProcessInfo.processInfo.environment["ANDROID_USER_HOME"] ?? Sh.home + "/.android"
+        return (try? String(contentsOfFile: dir + "/adbkey.pub", encoding: .utf8))?.split(separator: " ").first.map(String.init)
     }
 
     /// Hangs up a remote hold: the other Mac releases the emulator (and shuts it down if it booted it).
