@@ -360,6 +360,7 @@ enum Peers {
             let cwd = a.firstIndex(of: "--cwd").map { a[$0 + 1] } ?? FileManager.default.currentDirectoryPath
             let cmd = a[(sep + 1)...].joined(separator: " "), kind = Rules.classify(cmd) ?? "?"
             print("command: \(Offload.wrap(cmd) ?? "no build to move")")
+            print("checkout: \(Offload.root(cmd, cwd: cwd) ?? "none (no single checkout)")")
             var why = ""
             if let sh = Offload.shape(["/bin/zsh", "-c", cmd], kind: kind, cwd: cwd, why: &why) {
                 print("moves: \(kind) root=\(sh.root) rel=\(sh.rel)\(sh.simulator ? " simulator" : "")\(sh.emulator ? " emulator" : "")\(sh.device.map { " name=" + $0 } ?? "")")

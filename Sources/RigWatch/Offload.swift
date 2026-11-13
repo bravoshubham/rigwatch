@@ -111,6 +111,10 @@ enum Offload {
         var cmd = threadFlag.stringByReplacingMatches(in: argv[2], range: NSRange(argv[2].startIndex..., in: argv[2]), withTemplate: "")
         cmd = cmd.replacingOccurrences(of: "${HOME}", with: Sh.home).replacingOccurrences(of: "$HOME", with: Sh.home)
             .replacingOccurrences(of: #"(?<=^|[\s='"(:])~(?=/)"#, with: Sh.home, options: .regularExpression)
+        // Gradle told to download through a proxy on this Mac: there it downloads directly.
+        if cmd.range(of: #"-Dhttps?\.proxyHost=(?:127\.|localhost\b)"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            cmd = cmd.replacingOccurrences(of: #"\s+(['"]?)-Dhttps?\.(?:proxyHost|proxyPort|nonProxyHosts)=\S*?\1(?=\s|$)"#, with: "", options: .regularExpression)
+        }
         guard cmd.range(of: #"\$[A-Za-z_{]"#, options: .regularExpression) == nil else { why = "uses shell variables of this Mac"; return nil }
         guard let segs = segments(cmd) else { why = "runs in the background or substitutes commands"; return nil }
         // A proxy or server on 127.0.0.1 is this Mac's: there, the same address finds nothing.
@@ -217,7 +221,15 @@ enum Offload {
     // MARK: the command
 
     /// The worktree a command builds in, when there is one.
+    static let leadingCd = try! NSRegularExpression(pattern: #"^\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)"#)
     static func root(_ cmd: String, cwd: String) -> String? {
+        // A command that starts with `cd` builds there: the session's own folder (often the main checkout, with the
+        // build in a worktree) is not a second checkout.
+        var cwd = cwd
+        if let d = Rules.matches(leadingCd, cmd, group: 1).first {
+            let p = (d.trimmingCharacters(in: CharacterSet(charactersIn: "\"'")) as NSString).expandingTildeInPath
+            cwd = p.hasPrefix("/") ? p : cwd + "/" + p
+        }
         let r = Rules.roots(cmd, cwd: cwd)
         guard r.count <= 1, let top = r.first ?? (FileManager.default.fileExists(atPath: cwd + "/gradlew") ? cwd : nil), top != Sh.home else { return nil }
         return top
