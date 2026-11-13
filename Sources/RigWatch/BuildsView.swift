@@ -36,7 +36,7 @@ struct BuildsView: View {
                 SectionTitle(title: "Recent builds", aspect: .cpu, count: m.buildHistory.count)
                 if m.buildHistory.isEmpty { Text("No queued build has finished yet").hudLabel().padding(.leading, 14) }
                 else { rows { ForEach(m.buildHistory.prefix(30)) { historyRow($0) } } }
-                Text("Agents' Gradle, xcodebuild and npm, yarn or pod installs wait for a slot of their platform (set on the Rules page), first come first served. A slot is held only while the build tool runs, not while the rest of the command does, and nothing waits longer than \(s.maxWaitMinutes) min: then it starts anyway at background priority.")
+                Text("Agents' Gradle, xcodebuild and npm, yarn or pod installs wait for a slot of their platform (set on the Rules page), first come first served. A slot is held only while the build tool runs, not while the rest of the command does, and nothing waits longer than \(s.maxWaitMinutes) min: then it starts anyway, unless another Mac is getting ready to take it.")
                     .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
             }.padding(20)
         }
@@ -84,7 +84,7 @@ struct BuildsView: View {
             project(j.cwd)
             if let from = Self.fromMac(j.session) { Chip(text: "FOR \(from.uppercased())", icon: "laptopcomputer", color: Aspect.android.color).fixedSize().help("Sent here by RigWatch on \(from) (run_on_mac).") }
             else if let s = j.session { SessionLink(id: s) }
-            if j.overflow == true { Chip(text: "AFTER MAX WAIT · BACKGROUND", color: amber).fixedSize().help("It waited the longest allowed and started anyway, at background priority.") }
+            if j.overflow == true { Chip(text: "AFTER MAX WAIT", color: amber).fixedSize().help("It waited the longest allowed and started anyway, beyond the slots.") }
             if j.force == true { Chip(text: "STARTED NOW", color: Aspect.process.color).fixedSize() }
             Text(j.cmd).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(j.cmd)
             Spacer(minLength: 8)

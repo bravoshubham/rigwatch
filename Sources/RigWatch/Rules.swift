@@ -9,7 +9,7 @@ struct RuleSettings: Codable, Equatable {
     var queueBuilds = true
     var androidBuilds = 2        // builds at once in each pool: an Android build never waits behind an iOS one
     var iosBuilds = 1
-    var maxWaitMinutes = 10      // a build never waits longer: then it starts anyway, at background priority
+    var maxWaitMinutes = 10      // a build never waits longer: then it starts anyway
     var lowerOutside = true      // builds outside the queue, and Gradle's daemons, run at lower priority
     var buildThreads = max(2, ProcessInfo.processInfo.activeProcessorCount / 3)
     var physicalFirst = true
@@ -65,7 +65,7 @@ struct BuildJob: Codable, Identifiable {
     var since: Date
     var session: String?         // the agent session that started it
     var queuedAt: Date?
-    var overflow: Bool?          // started after waiting the longest allowed, at background priority
+    var overflow: Bool?          // started after waiting the longest allowed, beyond the slots
     var force: Bool?             // "Start now" from the Builds page
     var id: Int32 { pid }
     var alive: Bool { ProcSampler.startTime(pid) == start }
@@ -503,8 +503,11 @@ enum Rules {
         for r in roots { for n in DepCache.prepare(r) { say("RigWatch: " + n) } }
         if k == "xcodebuild" { for n in DepCache.prepareDerivedData(cmd: line, cwd: me.cwd) { say("RigWatch: " + n) } }
         let queue = s.queueBuilds && !s.paused
-        let t0 = Date(), maxWait = TimeInterval(max(1, s.maxWaitMinutes) * 60)
-        var last = "", overflow = false, forced = false
+        let t0 = Date(), maxWait = TimeInterval(ProcessInfo.processInfo.environment["RIGWATCH_MAX_WAIT"].flatMap(Int.init) ?? max(1, s.maxWaitMinutes) * 60)   // seconds, for tests
+        var last = "", overflow = false, forced = false, toldPeer = false
+        // Past the limit, a build another Mac is being readied for waits for that Mac, up to 20 more minutes, rather
+        // than starting here on top of the builds that are already making this Mac slow.
+        let waitForPeer = { (w: TimeInterval) in root != nil && Offload.preparing != nil && w < maxWait + 1200 }
         while true {
             let waited = Date().timeIntervalSince(t0)
             let ahead: [BuildJob]? = withJobs { j in
@@ -513,14 +516,18 @@ enum Rules {
                 let head = j.filter { $0.state == "waiting" && pool($0) == p }.min { $0.since < $1.since }
                 if j[i].force == true { forced = true }
                 else if queue, !(head?.pid == me.pid && fits(p, me.weight, j, s)) {
-                    // Never wait for ever: past the limit it starts anyway, at background priority.
-                    guard waited > maxWait else { return j.filter { pool($0) == p && ($0.state == "running" || ($0.state == "waiting" && $0.since < me.since)) } }
+                    // Never wait for ever: past the limit it starts anyway.
+                    guard waited > maxWait, !waitForPeer(waited) else { return j.filter { pool($0) == p && ($0.state == "running" || ($0.state == "waiting" && $0.since < me.since)) } }
                     overflow = true; j[i].overflow = true
                 }
                 j[i].state = "running"; j[i].since = Date(); return nil
             }
             guard let ahead else { break }
             if root != nil, Date().timeIntervalSince(lastTry) > 20, let code = elsewhere(full: true) { withExtendedLifetime(sources) {}; return code }
+            if !toldPeer, Date().timeIntervalSince(t0) > maxWait, let mac = Offload.preparing, waitForPeer(Date().timeIntervalSince(t0)) {
+                say("RigWatch: \(mac) is getting a copy of this worktree; this build waits for it (up to 20 more min) instead of starting here.")
+                toldPeer = true
+            }
             let msg = ahead.map { "\($0.kind) \($0.state) in \(($0.cwd as NSString).lastPathComponent)" }.joined(separator: "; ")
             if msg != last {
                 let by = t0.addingTimeInterval(maxWait).formatted(date: .omitted, time: .shortened)
@@ -530,7 +537,7 @@ enum Rules {
             Thread.sleep(forTimeInterval: 2)
         }
         let waited = Date().timeIntervalSince(t0)
-        if overflow { say("RigWatch: waited \(Int(waited / 60)) min for a slot; starting now at background priority, so it can't slow the Mac down.") }
+        if overflow { say("RigWatch: waited \(Int(waited / 60)) min for a slot; starting now anyway, at the same low priority as queued builds.") }
         else if forced { say("RigWatch: started from the Builds page after \(Int(waited)) s.") }
         else if waited > 3 { say("RigWatch: slot granted after \(Int(waited)) s") }
         // The slot is for the build tool itself: once it has run and exited, the rest of the command
@@ -554,7 +561,9 @@ enum Rules {
             }
         }
         let started = Date()
-        let code = spawn((overflow ? ["/usr/sbin/taskpolicy", "-b"] : ["/usr/sbin/taskpolicy", "-c", "utility"]) + a)
+        // Past the wait limit too: darwin-background priority keeps a build on the efficiency cores with its disk
+        // reads throttled, and on a busy Mac it then barely moves (a 3-minute build took 50).
+        let code = spawn(["/usr/sbin/taskpolicy", "-c", "utility"] + a)
         release()
         if code == 0 { for r in roots { DepCache.seed(r) } }   // the next worktree with these lockfiles starts from here
         BuildHistory.add(BuildRecord(kind: k, pool: p, cwd: me.cwd, cmd: me.cmd, session: session, queuedAt: t0, startedAt: started,

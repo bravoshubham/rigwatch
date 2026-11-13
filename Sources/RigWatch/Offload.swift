@@ -315,7 +315,11 @@ enum Offload {
     /// The least busy allowed Mac that can take this build now, or nil to build here. Only when this Mac is busy
     /// or its slots are full (`full`), and only a Mac clearly less busy and not itself near busy. A Mac without a
     /// copy of the worktree yet, or with an older RigWatch, gets one in the background and is used next time.
+    /// The Mac the last `pick` started getting ready (a copy of the worktree, a newer RigWatch), or nil.
+    static var preparing: String?
+
     static func pick(kind: String, root: String, full: Bool) -> (host: String, info: PeerInfo)? {
+        preparing = nil
         let h = Peers.here(), spare = Peers.limits.offloadMode == "spare"
         guard full || Peers.hereIsBusy(h) else { return nil }
         let allowed = Peers.load().filter(\.allowed)
@@ -343,6 +347,7 @@ enum Offload {
         for (host, i) in ok {
             if Peers.build(i.version) >= minBuild, have[key(host, root)] != nil { return (host, i) }
             prepare(host, root)
+            preparing = preparing ?? i.name
         }
         return nil
     }
@@ -355,7 +360,7 @@ enum Offload {
         let stamp = dir + "/" + Insecure.MD5.hash(data: Data(key(host, root).utf8)).map { String(format: "%02x", $0) }.joined()
         if let d = Rules.mtime(stamp), Date().timeIntervalSince(d) < 900 { return }
         Rules.write(Data(), to: stamp)
-        Rules.say("RigWatch: getting \(host) ready to take builds of \(Views.tilde(root)) in the background; this build runs here.")
+        Rules.say("RigWatch: getting \(host) ready to take builds of \(Views.tilde(root)) in the background; this build waits for a slot here meanwhile and goes there once the copy is ready.")
         detach([Rules.exe, "peer", "sync", host, root])
     }
 
