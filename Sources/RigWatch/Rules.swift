@@ -651,7 +651,7 @@ enum Rules {
 
     /// Runs every rule that is on. A dry run (apply false) only reports. `explicit` is a person asking
     /// from the page: no first-hour grace and no once-an-hour wait for the disk part.
-    static func reap(apply wanted: Bool, explicit: Bool = false) -> ReapReport {
+    static func reap(apply wanted: Bool, explicit: Bool = false, devicesOnly: Bool = false) -> ReapReport {
         var r = ReapReport()
         let s = RuleSettings.load()
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -670,6 +670,7 @@ enum Rules {
         if apply { _ = BuildGovernor().apply(procs) }   // with the app closed, the clean-up governs builds outside the queue
         if s.reapDevices { reapDevices(&r, s, procs, apply: apply) }
         let diskStamp = dir + "/last-disk-reap"
+        if devicesOnly { return r }
         if explicit || !apply || (mtime(diskStamp).map { Date().timeIntervalSince($0) > 3600 } ?? true) {
             if s.reapWorktrees { reapWorktrees(&r, s, procs, apply: apply) }
             if s.reapDerivedData { reapDerivedData(&r, s, apply: apply) }
@@ -917,15 +918,31 @@ enum Rules {
         if !hookInstalled() || !FileManager.default.fileExists(atPath: dir + "/installed") { write(Data(), to: dir + "/installed") }
         let entry: [String: Any] = ["matcher": "Bash|mcp__.*", "hooks": [["type": "command", "command": quote(exe) + " hook", "timeout": 45]]]
         if let err = editHooks({ $0.removeAll(where: isOurs); $0.append(entry) }) { return err }
-        let plist: [String: Any] = ["Label": agentLabel, "ProgramArguments": [exe, "reap", "--apply"], "StartInterval": 600, "RunAtLoad": true,
+        return "Rules on: new tool calls in every Claude Code session go through RigWatch, \(startAgent(exe: exe, devicesOnly: false)), and \(installMCP(exe: exe))."
+    }
+
+    /// The clean-up agent, every 10 minutes. Devices only on a Mac that just lends its emulators: its worktrees and
+    /// DerivedData are its owner's, and nothing there agreed to have them cleaned.
+    static func startAgent(exe: String, devicesOnly: Bool) -> String {
+        let plist: [String: Any] = ["Label": agentLabel, "ProgramArguments": [exe, "reap", "--apply"] + (devicesOnly ? ["--devices"] : []), "StartInterval": 600, "RunAtLoad": true,
                                     "LowPriorityIO": true, "ProcessType": "Background", "StandardErrorPath": dir + "/reap-errors.log"]
         write(try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0), to: agentPlist)
         let dom = "gui/\(getuid())"
         _ = Sh.run("/bin/launchctl", ["bootout", "\(dom)/\(agentLabel)"], timeout: 15)
         let b = Sh.run("/bin/launchctl", ["bootstrap", dom, agentPlist], timeout: 15)
-        let agent = b.code == 0 ? "the clean-up runs every 10 minutes"
+        return b.code == 0 ? "the clean-up runs every 10 minutes"
             : "the clean-up agent did not start (launchctl: \(b.err.trimmingCharacters(in: .whitespacesAndNewlines))); from Terminal run: launchctl bootstrap \(dom) \(agentPlist)"
-        return "Rules on: new tool calls in every Claude Code session go through RigWatch, \(agent), and \(installMCP(exe: exe))."
+    }
+
+    /// Sharing on a Mac without the rules on: emulators other Macs booted here are shut down when idle, as at home.
+    /// Turning sharing off removes only that devices-only agent.
+    static func shareAgent(_ on: Bool) {
+        let devicesOnly = (NSDictionary(contentsOfFile: agentPlist)?["ProgramArguments"] as? [String])?.contains("--devices") ?? false
+        if on, !agentInstalled() { log("peers: device clean-up on: \(startAgent(exe: exe, devicesOnly: true))") }
+        if !on, devicesOnly {
+            _ = Sh.run("/bin/launchctl", ["bootout", "gui/\(getuid())/\(agentLabel)"], timeout: 15)
+            try? FileManager.default.removeItem(atPath: agentPlist)
+        }
     }
 
     static func uninstall() -> String {
@@ -996,7 +1013,7 @@ enum CLI {
         case "hook": Rules.hook()   // nothing printed = the tool call goes ahead unchanged
         case "mcp": return MCPServer.main()
         case "peer": return Peers.main(a)
-        case "reap": let r = Rules.reap(apply: a.contains("--apply")); Rules.saveReport(r); print(r.text)
+        case "reap": let r = Rules.reap(apply: a.contains("--apply"), devicesOnly: a.contains("--devices")); Rules.saveReport(r); print(r.text)
         case "wt": return Rules.newWorktree(a)
         case "pin", "unpin":
             guard let id = a.first else { Rules.say("usage: RigWatch \(c) ID"); return 2 }

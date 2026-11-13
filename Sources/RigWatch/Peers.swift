@@ -371,7 +371,7 @@ enum Peers {
             return 0
         case "authorize": return authorize(Array(a.dropFirst()))
         case "share" where a.count == 2 && ["on", "off"].contains(a[1]):
-            var s = RuleSettings.load(); s.shareDevices = a[1] == "on"; s.save()
+            var s = RuleSettings.load(); s.shareDevices = a[1] == "on"; s.save(); Rules.shareAgent(s.shareDevices)
             Rules.log("peers: sharing turned \(a[1]) from another Mac"); print("sharing \(a[1])"); return 0
         default: Rules.say("usage: RigWatch peer info | peer refresh | peer install HOST [--share] | peer share on|off | peer hold --platform android [--name N] [--session S] [--purpose P] [--minutes M] [--from HOST]"); return 2
         }
@@ -379,6 +379,7 @@ enum Peers {
 
     static func info() -> PeerInfo {
         let s = RuleSettings.load(), devs = DeviceManager.running(), leases = Leases.live()
+        if s.shareDevices { Rules.shareAgent(true) }   // a Mac that shared before 1.11.1 gets its device clean-up on the next look
         func row(_ d: Device) -> PeerDevice { PeerDevice(id: d.id, name: d.name, free: d.claim == nil && !leases.contains { $0.covers(d) }) }
         var l = [Double](repeating: 0, count: 3); getloadavg(&l, 3)
         return PeerInfo(name: localName, version: AppCopy.ownVersion, sharing: s.shareDevices, cores: ProcessInfo.processInfo.activeProcessorCount,

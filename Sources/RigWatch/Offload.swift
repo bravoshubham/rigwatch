@@ -113,6 +113,10 @@ enum Offload {
             .replacingOccurrences(of: #"(?<=^|[\s='"(:])~(?=/)"#, with: Sh.home, options: .regularExpression)
         guard cmd.range(of: #"\$[A-Za-z_{]"#, options: .regularExpression) == nil else { why = "uses shell variables of this Mac"; return nil }
         guard let segs = segments(cmd) else { why = "runs in the background or substitutes commands"; return nil }
+        // A proxy or server on 127.0.0.1 is this Mac's: there, the same address finds nothing.
+        guard cmd.range(of: #"(?<![\w.-])(?:127\.\d+\.\d+\.\d+|localhost|\[::1\])(?![\w-])"#, options: [.regularExpression, .caseInsensitive]) == nil else {
+            why = "uses a proxy or server on this Mac (localhost)"; return nil
+        }
         for s in segs {
             let body = String(s[(Range(prefixes.firstMatch(in: s, range: NSRange(s.startIndex..., in: s))?.range ?? NSRange(), in: s)?.upperBound ?? s.startIndex)...])
             let tool = String(body.split(separator: " ").first ?? "")
@@ -401,7 +405,7 @@ enum Offload {
         #"not a git repository"#, #"xcode-select: error"#, #"Unable to find a (?:destination|device)"#, #"requires a provisioning profile"#,
         #"No signing certificate"#, #"unable to find utility"#, #"agreed to the Xcode license"#, #"Could not resolve package dependencies"#,
         #"Failed to clone repository"#, #"SDK "[^"]*" cannot be located"#, #"There is no SDK"#, #"is not installed\. To use with Xcode"#,
-        #"exit value 127\b"#, #"problem occurred evaluating settings"#, #"Unable to locate a Java Runtime"#, #"Cannot run program"#, #"node: not found"#, #"No such file or directory: node"#, #"Authorization is required to install"#, #"requires Xcode"#, #"No such module"#,
+        #"exit value 127\b"#, #"problem occurred evaluating settings"#, #"Unable to locate a Java Runtime"#, #"Cannot run program"#, #"node: not found"#, #"No such file or directory: node"#, #"Authorization is required to install"#, #"requires Xcode"#, #"No such module"#, #"Connection refused"#, #"Connect to (?:127\.0\.0\.1|localhost)"#,
         #"RigWatch on [^:]+: (?:no folder|no simulator|no emulator|this Mac doesn't share|.* doesn't share)"#, #"RIGWATCH_NO_PEER"#,
     ].joined(separator: "|"), options: [.caseInsensitive])
 

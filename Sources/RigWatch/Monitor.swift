@@ -739,7 +739,7 @@ final class Monitor: ObservableObject {
     }
 
     func setShareDevices(_ on: Bool) {
-        let save = { (v: Bool) in var s = RuleSettings.load(); s.shareDevices = v; s.save() }
+        let save = { (v: Bool) in var s = RuleSettings.load(); s.shareDevices = v; s.save(); Rules.shareAgent(v) }
         guard on else { save(false); outcome = ActionOutcome(title: "Stop sharing", text: "Other Macs can't take new devices here. Ones in use stay until their sessions hang up.", failed: false); return }
         pending = Pending(title: "Share this Mac's emulators?", message: "Agents on other Macs that allow this one may then take a free emulator here or boot one, and install and run their apps on it. They reach it over SSH, so they need SSH access to this Mac already.\n\nThe limits on the Rules page still apply here.", button: "Share") {
             save(true); return "Other Macs that allow this one can now use its emulators."
