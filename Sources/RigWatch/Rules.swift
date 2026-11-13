@@ -1012,7 +1012,7 @@ enum CLI {
     RigWatch version                    the version of this RigWatch
     RigWatch install|uninstall          turn the rules on or off (Claude Code hook, MCP device manager, clean-up agent)
     """
-    static let commands: Set = ["run", "hook", "mcp", "peer", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version"]
+    static let commands: Set = ["run", "progress", "hook", "mcp", "peer", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version"]
 
     static func main(_ args: [String]) -> Int32? {
         guard let c = args.first, commands.contains(c) else { return nil }
@@ -1022,6 +1022,12 @@ enum CLI {
         case "hook": Rules.hook()   // nothing printed = the tool call goes ahead unchanged
         case "mcp": return MCPServer.main()
         case "peer": return Peers.main(a)
+        case "progress":   // what the Builds page shows for each running queued build here (for checking)
+            let ps = ProcSampler().sample(), reader = BuildProgress.Reader()
+            for j in Rules.jobs() where j.state == "running" {
+                let p = reader.progress(job: j.pid, procs: ps)
+                print("\(j.pid) \(j.kind): \(p.map { "\($0.task ?? "-") \($0.count ?? "0")\($0.finished ? " finished" : "")" } ?? "no readable output")")
+            }
         case "reap": let r = Rules.reap(apply: a.contains("--apply"), devicesOnly: a.contains("--devices")); Rules.saveReport(r); print(r.text)
         case "wt": return Rules.newWorktree(a)
         case "pin", "unpin":

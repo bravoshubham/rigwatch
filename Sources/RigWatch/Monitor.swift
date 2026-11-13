@@ -54,6 +54,8 @@ final class Monitor: ObservableObject {
     @Published var asks: [Ask] = []                      // open "is it safe to shut down?" questions (asks.json)
     @Published var offloadSkips: [String] = []             // Macs not sent a project's builds for a while, and why
     @Published var remoteRuns: [Peers.RemoteRun] = []     // this Mac's run_on_mac runs in progress (remote-runs.json)
+    @Published var buildProgress: [Int32: BuildProgress] = [:]   // running queued builds here that write into a log file, by job pid
+    @Published var peerCPU: [String: Double] = [:]       // share of each other Mac's cores in use, by host (its last status)
     @Published var peerRows: [PeerRow] = []              // other Macs this Mac's agents may use, and how they are
     private var peersAt = Date.distantPast
     @Published var leases: [Lease] = []                  // devices lent to agent sessions (leases.json)
@@ -79,6 +81,7 @@ final class Monitor: ObservableObject {
     private let sysSampler = SystemSampler()
     private let devSampler = DeviceSampler()
     private let governor = BuildGovernor()
+    private let progressReader = BuildProgress.Reader()
     private var governedAt = Date.distantPast           // touched on the sampling queue only
     private let index = SessionIndex()
     private let agents = AgentIndex()
@@ -164,7 +167,7 @@ final class Monitor: ObservableObject {
             if history.isEmpty { history = Demo.history() }
             servers = Demo.servers(tick); sessions = Self.attach(servers, to: Demo.sessions(tick))
             if worktrees.isEmpty { worktrees = Demo.worktrees() }
-            leases = Demo.leases(); peerRows = Demo.peers(); remoteRuns = Demo.remoteRuns(); jobs = Demo.jobs(); outside = Demo.outside(); governed = Set(outside.map(\.pid))
+            leases = Demo.leases(); peerRows = Demo.peers(); remoteRuns = Demo.remoteRuns(); buildProgress = Demo.buildProgress(); peerCPU = ["studio": 0.62]; jobs = Demo.jobs(); outside = Demo.outside(); governed = Set(outside.map(\.pid))
             if buildHistory.isEmpty { buildHistory = Demo.buildHistory() }
             if bootable == nil { bootable = Demo.bootable() }
             selfCPU = 0.5; selfMem = 140 << 20
@@ -212,6 +215,14 @@ final class Monitor: ObservableObject {
             // Work this Mac has on other Macs: a local file, no SSH.
             let remoteRuns = Demo.on ? [] : (tab == .builds || tab == .deviceManager ? Peers.activeRuns() : self.remoteRuns)
             let jobs = Demo.on ? [] : Rules.jobs(), outside = Demo.on ? [] : Rules.outsideQueue(ps)
+            var progress: [Int32: BuildProgress]?, peerCPU: [String: Double]?
+            if tab == .builds, !Demo.on {
+                var pr: [Int32: BuildProgress] = [:]
+                for j in jobs where j.state == "running" { pr[j.pid] = self.progressReader.progress(job: j.pid, procs: ps) }
+                self.progressReader.settle(running: Set(jobs.filter { $0.state == "running" }.map(\.pid)))
+                progress = pr
+                peerCPU = Peers.seen().mapValues { s in max(s.info.cpuNow ?? 0, s.info.load / Double(max(1, s.info.cores))) }
+            }
             let governed = Demo.on ? [] : self.governor.apply(ps)
             let buildHistory: [BuildRecord]? = tab == .builds && Date().timeIntervalSince(self.historyAt) > 5 ? BuildHistory.recent(40) : nil
             let skips: [String]? = buildHistory == nil || Demo.on ? nil : Offload.failures().filter { Date().timeIntervalSince($0.value.at) < Offload.skipFor }
@@ -231,6 +242,8 @@ final class Monitor: ObservableObject {
                 if leases != self.leases { self.leases = leases }
                 self.jobs = jobs; self.outside = outside
                 if remoteRuns != self.remoteRuns { self.remoteRuns = remoteRuns }
+                if let progress, progress != self.buildProgress { self.buildProgress = progress }
+                if let peerCPU, peerCPU != self.peerCPU { self.peerCPU = peerCPU }
                 if governed != self.governed { self.governed = governed }
                 if let buildHistory { self.buildHistory = buildHistory; self.historyAt = Date() }
                 if let skips, skips != self.offloadSkips { self.offloadSkips = skips }
@@ -633,6 +646,16 @@ final class Monitor: ObservableObject {
             let done = j.state == "waiting" ? "Cancelled" : "Stopped"
             Rules.log("builds: \(done.lowercased()) \(j.kind) in \(Views.tilde(j.cwd)) from the app")
             return "\(done) \(j.kind) in \((j.cwd as NSString).lastPathComponent)."
+        }
+    }
+
+    func confirmStopRemote(_ r: Peers.RemoteRun) {
+        let msg = "\(r.command.prefix(200))\nin \(Views.tilde(r.cwd)) on \(r.mac)\(r.session.isEmpty ? "" : " for \(sessionLabel(r.session))")\n\nHangs up on \(r.mac), which stops the build there; the agent's command ends with an error."
+        pending = Pending(title: "Stop this build on \(r.mac)?", message: msg, button: "Stop") {
+            guard r.pid > 0, ProcSampler.startTime(r.pid) == r.pidStart else { return "That build has already finished." }
+            kill(r.pid, SIGTERM)
+            Rules.log("builds: stopped a build on \(r.host) in \(Views.tilde(r.cwd)) from the app")
+            return "Stopped the build on \(r.mac)."
         }
     }
 

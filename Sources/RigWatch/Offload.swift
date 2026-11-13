@@ -449,7 +449,8 @@ enum Offload {
         if sh.emulator { args.append("--emulator") }
         if let d = sh.device { args += ["--name", d] }
         args += ["--", sh.cmd.replacingOccurrences(of: root, with: there)]
-        rr.phase = "running"; Peers.noteRun(rr)
+        let key = BuildProgress.key(sh.cmd)
+        rr.phase = "running"; rr.progress = BuildProgress(total: BuildProgress.total(key)); Peers.noteRun(rr)
 
         // Paths there read as this Mac's: specific outputs first, then the worktree.
         let maps = (sh.back.map { (there + "/" + $0.from, $0.to) } + (sh.derived.map { [(there + "/.rigwatch-dd", $0)] } ?? []) + [(there, sh.root)])
@@ -459,7 +460,7 @@ enum Offload {
         p.arguments = Peers.sshOpts + ["-T", host, Peers.remote(args)]
         p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = errPipe
         let lock = NSLock()
-        var tail: [String] = []
+        var tail: [String] = [], noted = Date()
         func pump(_ pipe: Pipe, to out: FileHandle) -> DispatchGroup {
             let g = DispatchGroup(); g.enter()
             DispatchQueue.global().async {
@@ -468,7 +469,10 @@ enum Offload {
                     var s = String(decoding: line, as: UTF8.self)
                     for (a, b) in maps where s.contains(a) { s = s.replacingOccurrences(of: a, with: b) }
                     out.write(Data(s.utf8))
-                    lock.lock(); tail.append(s); if tail.count > 400 { tail.removeFirst(tail.count - 400) }; lock.unlock()
+                    lock.lock(); defer { lock.unlock() }
+                    tail.append(s); if tail.count > 400 { tail.removeFirst(tail.count - 400) }
+                    // The Builds page shows the task it is on: the run's record, rewritten at most once a second.
+                    if rr.progress?.read(s) == true, Date().timeIntervalSince(noted) > 1 { noted = Date(); Peers.noteRun(rr) }
                 }
                 while let d = try? pipe.fileHandleForReading.read(upToCount: 65536), !d.isEmpty {
                     buf.append(d)
@@ -498,6 +502,7 @@ enum Offload {
             lastFallback = host
             return nil
         }
+        if code == 0, let pr = rr.progress, pr.finished { BuildProgress.saveTotal(key, pr.done) }
         rr.phase = "copying back"; Peers.noteRun(rr)
         let back = copyBack(sh, host: host, there: rel)
         Rules.log("offload: built on \(host) for session \(session ?? "?") (exit \(code), copy \(Int(copied)) s, run \(Int(Date().timeIntervalSince(started))) s): \(sh.cmd.prefix(120))")

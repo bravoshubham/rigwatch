@@ -208,7 +208,12 @@ enum Demo {
 
     static func remoteRuns() -> [Peers.RemoteRun] {
         [Peers.RemoteRun(host: "studio", mac: "Studio", session: sessionSeed[0].id, command: "./gradlew connectedDebugAndroidTest",
-                         cwd: Sh.home + "/code/shop-android", phase: "running", since: ago(260), pid: 0, pidStart: 0)]
+                         cwd: Sh.home + "/code/shop-android", phase: "running", since: ago(260), pid: 0, pidStart: 0,
+                         progress: BuildProgress(task: ":app:connectedDebugAndroidTest", done: 611, total: 640))]
+    }
+    static func buildProgress() -> [Int32: BuildProgress] {
+        [20_901: BuildProgress(task: ":app:compileDebugKotlin", done: 412, total: 1085),
+         20_944: BuildProgress(task: "OrderWidgetView.swift", done: 133)]
     }
 
     static func bootable() -> (avds: [String], sims: [DeviceManager.Sim]) {

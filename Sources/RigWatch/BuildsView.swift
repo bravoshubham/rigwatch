@@ -88,6 +88,7 @@ struct BuildsView: View {
             if j.force == true { Chip(text: "STARTED NOW", color: Aspect.process.color).fixedSize() }
             Text(j.cmd).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(j.cmd)
             Spacer(minLength: 8)
+            progress(m.buildProgress[j.pid])
             Text(Fmt.cpu(m.treeCPU(j.pid))).font(.system(size: 11, design: .monospaced)).fixedSize()
             Text("for \(Self.span(Date().timeIntervalSince(j.since)))").hudLabel().fixedSize()
             Button("Stop") { m.confirmStopBuild(j) }.buttonStyle(HUDButton(color: red))
@@ -150,8 +151,23 @@ struct BuildsView: View {
             Chip(text: "ON \(r.mac.uppercased())", icon: "laptopcomputer", color: Aspect.android.color).fixedSize().help("Running on \(r.mac) (\(r.host)): moved there by the build queue, or through run_on_mac.")
             Text(r.command).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(r.command)
             Spacer(minLength: 8)
-            Text(r.phase.uppercased()).hudLabel().fixedSize()
+            if r.phase == "running" { progress(r.progress) } else { Text(r.phase.uppercased()).hudLabel().fixedSize() }
+            if let c = m.peerCPU[r.host] {
+                Text("\(Int((c * 100).rounded()))% CPU").font(.system(size: 11, design: .monospaced)).fixedSize().help("\(r.mac) as a whole: share of its cores in use when RigWatch last asked.")
+            }
             Text("for \(Self.span(Date().timeIntervalSince(r.since)))").hudLabel().fixedSize()
+            Button("Stop") { m.confirmStopRemote(r) }.buttonStyle(HUDButton(color: red))
+        }
+    }
+
+    /// The task a build is on and how many it has done, against the last successful run of the same tasks. Nothing
+    /// for a build whose output goes into a pipe or the agent's terminal.
+    @ViewBuilder func progress(_ p: BuildProgress?) -> some View {
+        if let p, p.done > 0 {
+            if let t = p.task { Text(t).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head).frame(maxWidth: 200, alignment: .trailing).help(t) }
+            if let f = p.fraction { ProgressView(value: f).progressViewStyle(.linear).frame(width: 60).tint(Aspect.cpu.color) }
+            Text(p.count ?? "").hudLabel().fixedSize()
+                .help(p.total == nil ? "Tasks done so far. The next run of the same tasks also shows the total, from this one." : "Tasks done, against the last successful run of the same tasks (an estimate).")
         }
     }
 

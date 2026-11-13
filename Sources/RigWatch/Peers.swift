@@ -171,6 +171,7 @@ enum Peers {
         var phase: String              // copying, running, copying back
         var since: Date
         var pid: Int32, pidStart: UInt64
+        var progress: BuildProgress?   // from its streamed output, from RigWatch 1.11.4
         var id: String { "\(pid)-\(Int(since.timeIntervalSince1970))" }   // whole seconds: the file keeps no fractions
     }
     static let runsFile = Rules.dir + "/remote-runs.json"
