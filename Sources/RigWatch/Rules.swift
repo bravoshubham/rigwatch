@@ -678,7 +678,12 @@ enum Rules {
         let procs = ProcSampler().sample()
         if apply { _ = BuildGovernor().apply(procs) }   // with the app closed, the clean-up governs builds outside the queue
         if s.reapDevices { reapDevices(&r, s, procs, apply: apply) }
-        let diskStamp = dir + "/last-disk-reap"
+        let diskStamp = dir + "/last-disk-reap", copyStamp = dir + "/last-copy-reap"
+        // Copies other Macs sent here to build: their own cache, so this runs even when only devices are looked after.
+        if explicit || !apply || (mtime(copyStamp).map { Date().timeIntervalSince($0) > 3600 } ?? true) {
+            reapRemoteCopies(&r, procs, apply: apply)
+            if apply { FileManager.default.createFile(atPath: copyStamp, contents: nil) }
+        }
         if devicesOnly { return r }
         if explicit || !apply || (mtime(diskStamp).map { Date().timeIntervalSince($0) > 3600 } ?? true) {
             if s.reapWorktrees { reapWorktrees(&r, s, procs, apply: apply) }
@@ -736,6 +741,33 @@ enum Rules {
                 log("shut down \(name): \(a.detail). \(res)")
             }
             r.actions.append(a)
+        }
+    }
+
+    /// Worktree copies other Macs sent here (`peer exec`) that no build has used for 3 days, or for 1 day when
+    /// the disk has less than 40 GB free. Another build of one just copies it again.
+    static func reapRemoteCopies(_ r: inout ReapReport, _ procs: [Proc], apply: Bool) {
+        let fm = FileManager.default, base = NSHomeDirectory() + "/Library/Caches/RigWatch/remote", now = Date()
+        guard let senders = try? fm.contentsOfDirectory(atPath: base) else { return }
+        let free = ((try? fm.attributesOfFileSystem(forPath: NSHomeDirectory()))?[.systemFreeSize] as? NSNumber)?.int64Value ?? .max
+        let limit: TimeInterval = free < 40 << 30 ? 86400 : 3 * 86400
+        let me = getuid(), cwds = procs.filter { $0.uid == me }.compactMap { ProcSampler.cwd($0.pid) }
+        for from in senders {
+            for name in (try? fm.contentsOfDirectory(atPath: base + "/" + from)) ?? [] {
+                let d = base + "/" + from + "/" + name
+                // Copies from before the stamp: rsync sets folders to the sender's times, so build output (never copied) says more.
+                let used = ([Offload.usedStamp, "", "build", "app/build", "android/app/build", ".gradle", ".rigwatch-dd"]
+                    .compactMap { mtime($0.isEmpty ? d : d + "/" + $0) }).max() ?? .distantPast
+                guard now.timeIntervalSince(used) > limit else { continue }
+                if cwds.contains(where: { $0 == d || $0.hasPrefix(d + "/") }) { r.kept.append("\(from)/\(name): a build is running in it"); continue }
+                var a = ReapAction(kind: "Remove copy", target: "\(from)/\(name)", key: d, detail: "worktree copy from \(from), last used \(Fmt.ago(used))")
+                if apply {
+                    do { try fm.removeItem(atPath: d); a.outcome = "done"; a.result = "removed" }
+                    catch { a.outcome = "failed"; a.result = "\(error.localizedDescription)" }
+                    log("removed worktree copy \(from)/\(name) (last used \(Fmt.ago(used))): \(a.result ?? "")")
+                }
+                r.actions.append(a)
+            }
         }
     }
 

@@ -278,7 +278,10 @@ enum Offload {
         for sig in [SIGTERM, SIGINT, SIGHUP] {
             signal(sig, SIG_IGN)
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .global())
-            src.setEventHandler { if Rules.child > 0 { kill(Rules.child, sig) } else { exit(128 + sig) } }
+            src.setEventHandler {
+                if copyPid > 0 { kill(copyPid, SIGTERM); exit(128 + sig) }   // stopped while copying: the copy stops too
+                if Rules.child > 0 { kill(Rules.child, sig) } else { exit(128 + sig) }
+            }
             src.resume(); sources.append(src)
         }
         defer { withExtendedLifetime(sources) {} }
@@ -332,7 +335,7 @@ enum Offload {
                 Rules.write(Data(), to: stamp); Peers.refreshAllowed(); seen = Peers.seen()
             }
         }
-        let skip = failures(), have = copies()
+        let skip = failures(), have = copies(), took = copyTimes()
         let ok = allowed.compactMap { p -> (String, PeerInfo)? in
             guard let s = seen[p.host], fresh(s) else { return nil }
             let i = s.info
@@ -345,6 +348,8 @@ enum Offload {
             return (p.host, i)
         }.sorted { $0.1.busy == $1.1.busy ? $0.1.cores > $1.1.cores : $0.1.busy < $1.1.busy }
         for (host, i) in ok {
+            // Copying it there lately took longer than most builds: worth it only when this build would otherwise wait.
+            if !full, let t = took[key(host, root)], t.seconds > slowCopy, Date().timeIntervalSince(t.at) < skipFor { continue }
             if Peers.build(i.version) >= minBuild, have[key(host, root)] != nil { return (host, i) }
             prepare(host, root)
             preparing = preparing ?? i.name
@@ -384,7 +389,8 @@ enum Offload {
         guard a.count == 2 else { Rules.say("usage: RigWatch peer sync HOST ROOT"); return 2 }
         let (host, root) = (a[0], a[1])
         guard case .online(let i) = Peers.ready(host), i.home != nil else { Rules.log("offload: \(host) is not ready to take builds"); return 1 }
-        let t0 = Date(), r = copy(root, to: host, keep: [])
+        let t0 = Date(), r = copy(root, to: host, keep: [], wait: false)
+        if r.code == -2 { Rules.log("offload: \(Views.tilde(root)) is already being copied to \(host)"); return 0 }
         guard r.code == 0 else { Rules.log("offload: could not copy \(Views.tilde(root)) to \(host): \(r.err.prefix(200))"); return 1 }
         noteCopy(host, root)
         Rules.log("offload: copied \(Views.tilde(root)) to \(host) in \(Int(Date().timeIntervalSince(t0))) s")
@@ -404,14 +410,71 @@ enum Offload {
     /// Copies a worktree over (only changes after the first time). Build outputs stay where they are on each side:
     /// they're excluded, so the copy there keeps its own and builds incrementally. Packages keep their own build
     /// folders (npm packages ship compiled code in build/), except React Native libraries' Android build output.
-    static func copy(_ root: String, to host: String, keep: [String]) -> Sh.Result {
+    /// One copy of a worktree to a Mac runs at a time: another build of it waits (`wait`) and then sends only what
+    /// changed meanwhile, or, for a background `peer sync`, leaves it to the copy already running.
+    static func copy(_ root: String, to host: String, keep: [String], wait: Bool = true) -> Sh.Result {
         let dest = copyDir(root)
-        var args = ["-az", "--delete", "-e", (["/usr/bin/ssh"] + Peers.sshOpts).joined(separator: " "), "--rsync-path", "mkdir -p \(Rules.quote(dest)) && rsync"]
+        let fd = open(Rules.dir + "/copy-" + Insecure.MD5.hash(data: Data(key(host, root).utf8)).map { String(format: "%02x", $0) }.joined() + ".lock", O_RDWR | O_CREAT, 0o644)
+        defer { if fd >= 0 { close(fd) } }
+        if fd >= 0, flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            guard wait else { return Sh.Result(code: -2, data: Data(), err: "another copy of it is running") }
+            Rules.say("RigWatch: another build is copying \(Views.tilde(root)) to \(host); waiting for it, then sending only what changed.")
+            flock(fd, LOCK_EX)
+        }
+        stopOrphans(host: host, dest: dest)
+        // The stamp tells that Mac's clean-up when the copy was last used (rsync keeps the folders' own times).
+        var args = ["-az", "--delete", "-e", (["/usr/bin/ssh"] + Peers.sshOpts).joined(separator: " "),
+                    "--rsync-path", "mkdir -p \(Rules.quote(dest)) && touch \(Rules.quote(dest))/\(usedStamp) && rsync", "--exclude", "/" + usedStamp]
         for f in ["- node_modules/**/android/build/", "- **/node_modules/**/android/build/", "+ node_modules/**", "+ **/node_modules/**", "+ Pods/**", "+ **/Pods/**"] { args += ["--filter", f] }
         for x in ["build/", ".gradle/", "DerivedData/", ".rigwatch-dd/", ".rigwatch-out/", ".cxx/", ".kotlin/", ".externalNativeBuild/"] { args += ["--exclude", x] }
         for k in keep { args += ["--exclude", "/" + k + "/"] }
-        return Sh.run("/usr/bin/rsync", args + [root + "/", host + ":" + dest + "/"], timeout: 3600)
+        let t0 = Date(), limit = 3600.0
+        var r = Sh.run("/usr/bin/rsync", args + [root + "/", host + ":" + dest + "/"], timeout: limit, started: { copyPid = $0 })
+        copyPid = 0
+        let took = Date().timeIntervalSince(t0)
+        noteCopyTime(host, root, took)
+        // 24: files vanished while copying, as they do in a worktree a session is working in. The rest got there.
+        if r.code == 24 { r = Sh.Result(code: 0, data: r.data, err: r.err) }
+        if r.code != 0, r.err.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let why = took >= limit - 5 ? "it was still copying after \(Int(limit / 60)) min and was stopped"
+                : r.code == 255 ? "ssh to \(host) failed" : r.code == 15 || r.code == 20 ? "the copy was stopped" : "rsync exited \(r.code)"
+            r = Sh.Result(code: r.code, data: r.data, err: "\(why) (after \(Int(took)) s)")
+        }
+        return r
     }
+
+    static let usedStamp = ".rigwatch-used"
+    /// The rsync of a copy in progress, stopped with the build that started it.
+    static var copyPid: pid_t = 0
+
+    /// With the lock held no other copy to that folder is meant to run: one still running belongs to a build that
+    /// went away without stopping it, and would only fight this one.
+    static func stopOrphans(host: String, dest: String) {
+        let target = host + ":" + dest + "/"
+        for l in Sh.run("/bin/ps", ["-Ao", "pid=,ppid=,command="], timeout: 20).out.split(separator: "\n") {
+            let f = l.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+            guard f.count == 3, let pid = Int32(f[0]), pid != getpid(), f[2].hasPrefix("/usr/bin/rsync "), f[2].hasSuffix(target) else { continue }
+            kill(pid, SIGTERM)
+            Rules.log("offload: stopped a copy to \(host) left running by a build that went away (rsync \(pid))")
+        }
+    }
+
+    /// How long the last copy of each worktree to each Mac took, successful or not.
+    static let copyTimesFile = Rules.dir + "/copy-times.json"
+    struct CopyTime: Codable { var at: Date; var seconds: Double }
+    static func copyTimes() -> [String: CopyTime] {
+        FileManager.default.contents(atPath: copyTimesFile).flatMap { try? Leases.decoder.decode([String: CopyTime].self, from: $0) } ?? [:]
+    }
+    static func noteCopyTime(_ host: String, _ root: String, _ s: TimeInterval) {
+        let fd = open(Rules.dir + "/remote-copies.lock", O_RDWR | O_CREAT, 0o644)
+        if fd >= 0 { flock(fd, LOCK_EX) }
+        defer { if fd >= 0 { close(fd) } }
+        var all = copyTimes().filter { Date().timeIntervalSince($0.value.at) < skipFor }
+        all[key(host, root)] = CopyTime(at: Date(), seconds: s)
+        Rules.write(try? Leases.encoder.encode(all), to: copyTimesFile)
+    }
+    /// A copy slower than this sends the next build of that worktree there only when no slot is free here.
+    static let slowCopy: TimeInterval = 600
 
     /// Output that means the other Mac can't build this project at all (rather than the code being wrong).
     static let cantBuildThere = try! NSRegularExpression(pattern: [
@@ -439,7 +502,7 @@ enum Offload {
         let c = copy(sh.root, to: host, keep: sh.keep)
         guard c.code == 0 else {
             let why = "could not copy the worktree there: " + c.err.trimmingCharacters(in: .whitespacesAndNewlines).prefix(160)
-            noteFailure(host, sh.root, why); Rules.log("offload: \(host): \(why)"); Rules.say("RigWatch: \(why); building here instead.")
+            Rules.log("offload: \(host): \(why)"); Rules.say("RigWatch: \(why); building here instead.")
             return nil
         }
         noteCopy(host, sh.root)
