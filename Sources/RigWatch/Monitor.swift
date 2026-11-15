@@ -641,7 +641,7 @@ final class Monitor: ObservableObject {
         var msg = "\(j.kind) in \(Views.tilde(j.cwd))\(j.session.map { " for \(sessionLabel($0))" } ?? "")\n$ \(j.cmd.prefix(200))"
         msg += j.state == "waiting" ? "\n\nIt has not started; the agent's command ends with an error." : "\n\nSends SIGTERM to the build; the agent's command ends with an error and the agent may run it again."
         pending = Pending(title: j.state == "waiting" ? "Cancel this build?" : "Stop this build?", message: msg, button: what) {
-            guard ProcSampler.startTime(j.pid) == j.start else { return "That build has already finished." }
+            guard ProcSampler.startTime(j.pid) == j.start else { Rules.log("builds: stop of \(j.kind) in \(Views.tilde(j.cwd)): it had already finished"); return "That build has already finished." }
             kill(j.pid, SIGTERM)
             let done = j.state == "waiting" ? "Cancelled" : "Stopped"
             Rules.log("builds: \(done.lowercased()) \(j.kind) in \(Views.tilde(j.cwd)) from the app")
@@ -652,7 +652,7 @@ final class Monitor: ObservableObject {
     func confirmStopRemote(_ r: Peers.RemoteRun) {
         let msg = "\(r.command.prefix(200))\nin \(Views.tilde(r.cwd)) on \(r.mac)\(r.session.isEmpty ? "" : " for \(sessionLabel(r.session))")\n\nHangs up on \(r.mac), which stops the build there; the agent's command ends with an error."
         pending = Pending(title: "Stop this build on \(r.mac)?", message: msg, button: "Stop") {
-            guard r.pid > 0, ProcSampler.startTime(r.pid) == r.pidStart else { return "That build has already finished." }
+            guard r.pid > 0, ProcSampler.startTime(r.pid) == r.pidStart else { Rules.log("builds: stop of a build on \(r.host): it had already finished"); return "That build has already finished." }
             kill(r.pid, SIGTERM)
             Rules.log("builds: stopped a build on \(r.host) in \(Views.tilde(r.cwd)) from the app")
             return "Stopped the build on \(r.mac)."

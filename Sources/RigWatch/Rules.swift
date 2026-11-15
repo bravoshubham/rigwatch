@@ -489,7 +489,7 @@ enum Rules {
         for sig in [SIGTERM, SIGINT, SIGHUP] {
             signal(sig, SIG_IGN)   // the child gets default handlers back (POSIX_SPAWN_SETSIGDEF)
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .global())
-            src.setEventHandler { if child > 0 { kill(child, sig) } else { release(); exit(128 + sig) } }
+            src.setEventHandler { if child > 0 { stopTree(child, sig) } else { release(); exit(128 + sig) } }
             src.resume(); sources.append(src)
         }
         // Another Mac first, when this one is busy or the build would wait for a slot.
@@ -593,6 +593,22 @@ enum Rules {
         return out
     }
 
+    /// Stops a command and everything it started. The shell of `zsh -c "cd … && ./gradlew …"` dies of the signal
+    /// without passing it on, so Gradle, xcodebuild and their workers get it themselves; what still runs 15 s later
+    /// gets SIGKILL.
+    static func stopTree(_ pid: pid_t, _ sig: Int32) {
+        var all: [(pid: pid_t, start: UInt64)] = [], stack = [pid]
+        while let p = stack.popLast() {
+            if let st = ProcSampler.startTime(p) { all.append((p, st)) }
+            var buf = [pid_t](repeating: 0, count: 1024)
+            _ = proc_listpids(UInt32(PROC_PPID_ONLY), UInt32(p), &buf, Int32(buf.count * MemoryLayout<pid_t>.size))
+            stack += buf.filter { $0 > 0 && $0 != p }
+        }
+        stopping = all   // `spawn` waits for them after the shell is gone
+        for t in all.reversed() { kill(t.pid, sig) }
+    }
+    static var stopping: [(pid: pid_t, start: UInt64)]?
+
     static func spawn(_ argv: [String]) -> Int32 {
         var attr: posix_spawnattr_t? = nil
         posix_spawnattr_init(&attr)
@@ -612,6 +628,12 @@ enum Rules {
         var st: Int32 = 0
         while waitpid(pid, &st, 0) == -1 && errno == EINTR {}
         child = 0
+        if let left = stopping {
+            let alive = { (t: (pid: pid_t, start: UInt64)) in ProcSampler.startTime(t.pid) == t.start }
+            let until = Date().addingTimeInterval(15)
+            while Date() < until, left.contains(where: alive) { usleep(200_000) }
+            for t in left where alive(t) { kill(t.pid, SIGKILL) }
+        }
         return st & 0x7f == 0 ? (st >> 8) & 0xff : 128 + (st & 0x7f)
     }
 
