@@ -355,6 +355,10 @@ enum Peers {
         case "refresh": refreshAllowed(); return 0
         case "sync": return Offload.sync(Array(a.dropFirst()))
         case "exec": return Offload.exec(Array(a.dropFirst()))
+        case "iphones": print(String(decoding: (try? JSONEncoder().encode(IPhones.here())) ?? Data(), as: UTF8.self)); return 0
+        case "iphone-install" where a.count == 3:   // the asking Mac got the user's yes before sending it
+            let r = IPhones.installHere(a[1], Sh.home + "/" + a[2])
+            print(r.out); FileHandle.standardError.write(Data(r.err.utf8)); return r.code
         case "plan":
             // `peer plan [--cwd D] -- CMD`: whether and how a build would run on another Mac (for checking the rules).
             guard let sep = a.firstIndex(of: "--") else { return 2 }

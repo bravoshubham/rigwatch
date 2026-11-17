@@ -10,7 +10,8 @@ enum DeviceManager {
     static var session: String { ProcessInfo.processInfo.environment["CLAUDE_CODE_SESSION_ID"].flatMap { $0.isEmpty ? nil : $0 } ?? "pid:\(getppid())" }
     static var owner: (pid: Int32, start: UInt64) { (getppid(), ProcSampler.startTime(getppid()) ?? 0) }
 
-    static func platform(of d: Device) -> String { d.kind == .simulator ? "ios" : "android" }
+    /// A real iPhone is never handed out: installing on it waits for the user's yes (install_on_iphone).
+    static func platform(of d: Device) -> String { d.iPhone ? "iphone" : d.kind == .simulator ? "ios" : "android" }
 
     static let emulatorPath: String? = {
         let env = ProcessInfo.processInfo.environment
@@ -23,7 +24,7 @@ enum DeviceManager {
 
     // MARK: what exists
 
-    static func running() -> [Device] { DeviceSampler().sample(procs: ProcSampler().sample(), deep: false).filter { $0.state == "device" || $0.kind == .simulator } }
+    static func running() -> [Device] { DeviceSampler().sample(procs: ProcSampler().sample(), deep: false).filter { $0.state == "device" || $0.kind == .simulator || $0.iPhone } }
 
     static func avds() -> [String] {
         guard let emulatorPath else { return [] }
@@ -57,8 +58,10 @@ enum DeviceManager {
     static func list(platform: String?) -> [String: Any] {
         let leases = Leases.live(), me = session, devs = running()
         let rows: [[String: Any]] = devs.filter { platform == nil || self.platform(of: $0) == platform }.map { d in
-            var row: [String: Any] = ["id": d.id, "name": d.name, "platform": self.platform(of: d), "kind": d.kind.rawValue, "state": d.state]
-            if let l = leases.first(where: { $0.covers(d) }) {
+            var row: [String: Any] = ["id": d.id, "name": d.name, "platform": self.platform(of: d), "kind": d.kindName, "state": d.state]
+            if d.iPhone {
+                row["install"] = "Not leased out. Install a device build on it with install_on_iphone; the user allows each install."
+            } else if let l = leases.first(where: { $0.covers(d) }) {
                 row["lease"] = ["yours": l.session == me, "session": l.session, "until": iso(l.until), "purpose": l.purpose, "in_use_without_acquire": l.isImplicit]
             } else if let c = d.claim {
                 row["held_by_agent_device"] = ["session": c.session, "workspace": c.workspace]
@@ -342,6 +345,9 @@ enum MCPServer {
         tool("prepare_worktree", "Prepare a new worktree before its first install or build: copies in node_modules, CocoaPods' Pods and Xcode's package and module caches from another worktree or RigWatch's store when they match this worktree's lockfiles (an APFS clone: seconds, no extra disk). The install afterwards only checks them. Builds and installs run through RigWatch do this on their own; call it to have it done up front.",
              ["path": ["type": "string", "description": "The worktree (or any folder in it). Defaults to the current directory."],
               "derived_data_path": ["type": "string", "description": "The -derivedDataPath your xcodebuild uses, if any, relative to the worktree."]], required: []),
+        tool("install_on_iphone", "Install a built app on the user's real iPhone. RigWatch asks the user in its window first, every time, and waits up to 10 minutes for the answer; the phone may be paired with another Mac, which then installs it. The app must be built for iphoneos and signed for that phone (not a simulator build).",
+             ["path": ["type": "string", "description": "The built .app, e.g. build/Build/Products/Debug-iphoneos/App.app."],
+              "device": ["type": "string", "description": "The phone's name or UDID. Needed only when more than one is reachable."]], required: ["path"]),
         tool("build_queue", "Show RigWatch's build queue: Android and iOS slots, running and waiting builds, memory pressure, and how busy this Mac and the other allowed Macs are.", [:], required: []),
     ]
 
@@ -442,6 +448,9 @@ enum MCPServer {
                 guard let id = str("id") else { throw DeviceManager.Failure(message: "id is required") }
                 out = try DeviceManager.release(id, shutdown: a["shutdown"] as? Bool)
             case "build_queue": out = Rules.status() + "\n" + Peers.loadReport()
+            case "install_on_iphone":
+                guard let p = str("path") else { throw DeviceManager.Failure(message: "path is required") }
+                out = try IPhones.install(path: p, device: str("device"), session: DeviceManager.session)
             case "run_on_mac":
                 guard let cmd = str("command") else { throw DeviceManager.Failure(message: "command is required") }
                 let start = (str("path").map { ($0 as NSString).expandingTildeInPath }) ?? FileManager.default.currentDirectoryPath

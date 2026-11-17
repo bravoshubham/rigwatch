@@ -659,7 +659,7 @@ struct DeviceCard: View {
                     IconBadge(aspect: aspect, size: 34)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(d.name).font(.system(size: 17, weight: .semibold)).lineLimit(1)
-                        Text([d.kind.rawValue, d.serial, d.detail.isEmpty ? nil : d.detail].compactMap { $0 }.joined(separator: " · ")).hudLabel().lineLimit(1)
+                        Text([d.kindName, d.iPhone ? d.state : d.serial, d.detail.isEmpty ? nil : d.detail].compactMap { $0 }.joined(separator: " · ")).hudLabel().lineLimit(1)
                     }
                     Spacer()
                     HStack(spacing: 6) { Dot(color: Heat.status(d.state)); Text(d.state == "device" ? "online" : d.state).hudLabel(Heat.status(d.state)) }.fixedSize()

@@ -145,10 +145,30 @@ final class Monitor: ObservableObject {
         if updateReady != v { updateReady = v }
     }
 
+    /// An agent wants to install an app on a real iPhone: ask the user, one request at a time, even with no window open.
+    private var askingIPhone = false
+    private func askIPhoneInstalls() {
+        guard !askingIPhone, !Demo.on, let r = IPhones.requests().first(where: { $0.answer == nil }) else { return }
+        askingIPhone = true
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            let a = NSAlert()
+            a.messageText = "Install \(r.app) on \(r.phone)?"
+            a.informativeText = "\(self.sessionLabel(r.session)) asks to install \(r.app) \(r.version) (\(r.bundleID)) on \(r.phone), from \(r.mac).\n\n\(Views.tilde(r.path))\n\nIt replaces the version on the phone, keeping its data. No answer by \(Leases.time(r.askedAt.addingTimeInterval(IPhones.wait))) counts as Don't Install."
+            a.addButton(withTitle: "Install")
+            a.addButton(withTitle: "Don't Install")
+            a.window.level = .floating
+            let yes = a.runModal() == .alertFirstButtonReturn
+            if IPhones.requests().contains(where: { $0.id == r.id }) { IPhones.answer(r.id, yes) }
+            self.askingIPhone = false
+        }
+    }
+
     private func heartbeat(force: Bool = false) {
         tick += 1
         let visible = windowVisible
         checkForUpdate()
+        askIPhoneInstalls()
         // Hidden: a cheap CPU/memory check every 5 s keeps the spike history going; processes are
         // listed only while the machine is busy, so the culprits of a spike are on record.
         if !visible, !force, !Demo.on, !running, Date().timeIntervalSince(lastProbe) >= 5, Date().timeIntervalSince(lastFull) < 55 { probe(); return }

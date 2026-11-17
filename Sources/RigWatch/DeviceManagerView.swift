@@ -94,7 +94,7 @@ struct DeviceManagerView: View {
                 .font(.system(size: 15)).foregroundStyle(a.color.readable(scheme)).frame(width: 20).padding(.top, 2)
             VStack(alignment: .leading, spacing: 3) {
                 Text(d.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                Text([d.lease?.remote.map { "Android emulator on \($0)" } ?? d.kind.rawValue, d.id.count > 20 ? String(d.id.prefix(8)) + "…" : d.id].joined(separator: " · ")).hudLabel().lineLimit(1).help(d.id)
+                Text([d.lease?.remote.map { "Android emulator on \($0)" } ?? d.kindName, d.id.count > 20 ? String(d.id.prefix(8)) + "…" : d.id].joined(separator: " · ")).hudLabel().lineLimit(1).help(d.id)
             }.frame(width: 200, alignment: .leading)
             VStack(alignment: .leading, spacing: 6) {
                 if let l = d.lease { lease(l, kind: nil) }
@@ -111,8 +111,9 @@ struct DeviceManagerView: View {
                     }
                 } else {
                     HStack(spacing: 6) {
-                        Chip(text: "FREE", icon: "checkmark.circle", color: Color(hex: 0x3DDC97)).fixedSize()
-                        Text(d.kind == .phone && RuleSettings.load().physicalFirst ? "agents asking for Android get it before any emulator" : "the next agent asking for one can get it")
+                        Chip(text: d.iPhone ? "INSTALLS ASK YOU" : "FREE", icon: d.iPhone ? "hand.raised" : "checkmark.circle", color: Color(hex: 0x3DDC97)).fixedSize()
+                        Text(d.iPhone ? "not handed out; agents install on it with install_on_iphone, after you allow each install"
+                             : d.kind == .phone && RuleSettings.load().physicalFirst ? "agents asking for Android get it before any emulator" : "the next agent asking for one can get it")
                             .hudLabel().lineLimit(1)
                     }
                 }

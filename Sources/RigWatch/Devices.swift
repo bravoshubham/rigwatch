@@ -21,13 +21,16 @@ struct Device: Identifiable {
     var foreground = ""            // top activity / running apps
     var screen = ""
     var guestLoad = ""
-    var serial: String? { kind == .simulator || id.hasPrefix("pid:") ? nil : id }
+    var iPhone = false             // a real iPhone or iPad (id is its UDID): installs on it go through the user's yes
+    var kindName: String { iPhone ? (detail.contains("iPad") ? "iPad" : "iPhone") : kind.rawValue }
+    var serial: String? { kind == .simulator || iPhone || id.hasPrefix("pid:") ? nil : id }
 }
 
 final class DeviceSampler {
     private var avdBySerial: [String: (pid: Int32?, avd: String)] = [:]
     private var details: [String: (fg: String, screen: String, load: String)] = [:]
     private var detailsAt = Date.distantPast
+    private var iPhones: (at: Date, list: [IPhones.Phone]) = (.distantPast, [])
 
     /// Every emulator process and adb device, plus every booted simulator, with CPU/memory summed
     /// over the process tree. `deep` also asks each device what it is showing (one adb/simctl call each).
@@ -111,6 +114,15 @@ final class DeviceSampler {
                 d.foreground = Array(Set(apps)).sorted().joined(separator: ", ")
                 out.append(d)
             }
+        }
+
+        // Real iPhones and iPads, while this Mac reaches them (USB or the local network). devicectl takes a
+        // second or two, so its answer is kept for 15 s.
+        if Date().timeIntervalSince(iPhones.at) > 15 { iPhones = (Date(), IPhones.here()) }
+        for p in iPhones.list {
+            var d = Device(id: p.udid, kind: .phone, name: p.name)
+            d.detail = p.model; d.state = p.transport == "wired" ? "USB" : "Wi-Fi"; d.iPhone = true
+            out.append(d)
         }
 
         if deep && Date().timeIntervalSince(detailsAt) > 10 {

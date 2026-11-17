@@ -356,6 +356,9 @@ enum Rules {
         var out: [String: Any] = ["hookEventName": "PreToolUse"]
         switch tool {
         case "Bash":
+            if has(iphoneInstall, ti["command"] as? String ?? "") {
+                return denial("Installing on a real iPhone needs the user's yes each time. Call the rigwatch MCP tool install_on_iphone with the built .app (it asks the user in RigWatch and installs through the Mac the phone is paired with), or run: RigWatch iphone install PATH.app [--device NAME]")
+            }
             switch wrap(ti["command"] as? String ?? "", s) {
             case .leave: return nil
             case .deny(let why): return denial(why)
@@ -396,6 +399,9 @@ enum Rules {
         out["updatedInput"] = ti
         return out
     }
+
+    /// Installing on a real iPhone around RigWatch's ask: devicectl or ios-deploy directly, the peer step, or the answers file.
+    static let iphoneInstall = rx(#"\bdevicectl\s+device\s+install\b|\bios-deploy\b|\bpeer\s+iphone-install\b|iphone-installs\.(?:json|lock)"#)
 
     static func denial(_ why: String) -> [String: Any] {
         ["hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "RigWatch: " + why]
@@ -1062,11 +1068,13 @@ enum CLI {
     RigWatch status                     what is running, queued and booted
     RigWatch mcp                        MCP server: agents acquire and release emulators, simulators and phones
     RigWatch peer info|hold|run         what another Mac's RigWatch uses to borrow this Mac's devices (over SSH)
+    RigWatch iphone list                paired iPhones here and on the allowed Macs
+    RigWatch iphone install APP [--device NAME]  install an .app on a real iPhone, after the user allows it in RigWatch
     RigWatch peer install HOST [--share]  copy this RigWatch to another Mac over SSH (and turn sharing on there)
     RigWatch version                    the version of this RigWatch
     RigWatch install|uninstall          turn the rules on or off (Claude Code hook, MCP device manager, clean-up agent)
     """
-    static let commands: Set = ["run", "progress", "hook", "mcp", "peer", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version"]
+    static let commands: Set = ["run", "progress", "hook", "mcp", "peer", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version", "iphone"]
 
     static func main(_ args: [String]) -> Int32? {
         guard let c = args.first, commands.contains(c) else { return nil }
@@ -1076,6 +1084,7 @@ enum CLI {
         case "hook": Rules.hook()   // nothing printed = the tool call goes ahead unchanged
         case "mcp": return MCPServer.main()
         case "peer": return Peers.main(a)
+        case "iphone": return IPhones.main(a)
         case "progress":   // what the Builds page shows for each running queued build here (for checking)
             let ps = ProcSampler().sample(), reader = BuildProgress.Reader()
             for j in Rules.jobs() where j.state == "running" {
