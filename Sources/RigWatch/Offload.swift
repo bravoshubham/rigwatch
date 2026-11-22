@@ -346,15 +346,46 @@ enum Offload {
             guard i.sharing, fits, kind != "xcodebuild" || i.xcode,
                   skip[key(p.host, root)].map({ Date().timeIntervalSince($0.at) > skipFor }) ?? true else { return nil }
             return (p.host, i)
-        }.sorted { $0.1.busy == $1.1.busy ? $0.1.cores > $1.1.cores : $0.1.busy < $1.1.busy }
-        for (host, i) in ok {
-            // Copying it there lately took longer than most builds: worth it only when this build would otherwise wait.
-            if !full, let t = took[key(host, root)], t.seconds > slowCopy, Date().timeIntervalSince(t.at) < skipFor { continue }
-            if Peers.build(i.version) >= minBuild, have[key(host, root)] != nil { return (host, i) }
-            prepare(host, root)
-            preparing = preparing ?? i.name
         }
+        let sent = Dictionary(grouping: Peers.activeRuns(), by: \.host).mapValues(\.count)
+        let ranked = ok.sorted { room($0.1, sent[$0.0] ?? 0) > room($1.1, sent[$1.0] ?? 0) }
+        guard let best = ranked.first else { return nil }
+        for (host, i) in ranked where Peers.build(i.version) >= minBuild && have[key(host, root)] != nil {
+            let t = took[key(host, root)].flatMap { Date().timeIntervalSince($0.at) < skipFor ? $0.seconds : nil }
+            // Copying it there lately took longer than most builds: worth it only when this build would otherwise wait.
+            if !full, let t, t > slowCopy { continue }
+            if host == best.0 { return (host, i) }
+            // A Mac with less room that already has a copy: only while bringing that copy up to date is quick.
+            if (t ?? 0) < 120 {
+                if have[key(best.0, root)] == nil { prepare(best.0, root) }
+                return (host, i)
+            }
+        }
+        // None has a copy yet: the Mac with the most room gets one in the background, unless one is on its way somewhere.
+        prepare(best.0, root)
+        preparing = best.1.name
         return nil
+    }
+
+    /// How many more builds a Mac has room for: spare cores (4 a build) or free memory (6 GB a build), whichever is
+    /// less, minus the builds this Mac has sent it that haven't finished.
+    static func room(_ i: PeerInfo, _ sent: Int) -> Double {
+        let cores = Double(i.cores) * max(0, 1 - i.busy), mem = i.memGB * Double(i.memFree ?? 50) / 100
+        return min(cores / 4, mem / 6) - Double(sent)
+    }
+
+    /// Whether a copy of this worktree to any Mac is running now (its lock is held).
+    static func copying(_ root: String) -> String? {
+        Peers.load().map(\.host).first { host in
+            let fd = open(copyLock(host, root), O_RDONLY)
+            guard fd >= 0 else { return false }
+            defer { close(fd) }
+            if flock(fd, LOCK_SH | LOCK_NB) != 0 { return true }
+            flock(fd, LOCK_UN); return false
+        }
+    }
+    static func copyLock(_ host: String, _ root: String) -> String {
+        Rules.dir + "/copy-" + Insecure.MD5.hash(data: Data(key(host, root).utf8)).map { String(format: "%02x", $0) }.joined() + ".lock"
     }
 
     /// `RigWatch peer sync HOST ROOT` in the background (at most every 15 minutes per Mac and worktree): brings
@@ -364,6 +395,8 @@ enum Offload {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let stamp = dir + "/" + Insecure.MD5.hash(data: Data(key(host, root).utf8)).map { String(format: "%02x", $0) }.joined()
         if let d = Rules.mtime(stamp), Date().timeIntervalSince(d) < 900 { return }
+        // One copy of a worktree on its way at a time: a second Mac would only halve the speed of both.
+        if let other = copying(root) { Rules.say("RigWatch: \(Views.tilde(root)) is being copied to \(other); this build waits for a slot here or for that copy."); return }
         Rules.write(Data(), to: stamp)
         Rules.say("RigWatch: getting \(host) ready to take builds of \(Views.tilde(root)) in the background; this build waits for a slot here meanwhile and goes there once the copy is ready.")
         detach([Rules.exe, "peer", "sync", host, root])
@@ -414,7 +447,7 @@ enum Offload {
     /// changed meanwhile, or, for a background `peer sync`, leaves it to the copy already running.
     static func copy(_ root: String, to host: String, keep: [String], wait: Bool = true) -> Sh.Result {
         let dest = copyDir(root)
-        let fd = open(Rules.dir + "/copy-" + Insecure.MD5.hash(data: Data(key(host, root).utf8)).map { String(format: "%02x", $0) }.joined() + ".lock", O_RDWR | O_CREAT, 0o644)
+        let fd = open(copyLock(host, root), O_RDWR | O_CREAT, 0o644)
         defer { if fd >= 0 { close(fd) } }
         if fd >= 0, flock(fd, LOCK_EX | LOCK_NB) != 0 {
             guard wait else { return Sh.Result(code: -2, data: Data(), err: "another copy of it is running") }
@@ -423,11 +456,12 @@ enum Offload {
         }
         stopOrphans(host: host, dest: dest)
         // The stamp tells that Mac's clean-up when the copy was last used (rsync keeps the folders' own times).
-        var args = ["-az", "--delete", "-e", (["/usr/bin/ssh"] + Peers.sshOpts).joined(separator: " "),
+        var args = [nearby(host) ? "-a" : "-az", "--delete", "-e", (["/usr/bin/ssh"] + Peers.sshOpts).joined(separator: " "),
                     "--rsync-path", "mkdir -p \(Rules.quote(dest)) && touch \(Rules.quote(dest))/\(usedStamp) && rsync", "--exclude", "/" + usedStamp]
         for f in ["- node_modules/**/android/build/", "- **/node_modules/**/android/build/", "+ node_modules/**", "+ **/node_modules/**", "+ Pods/**", "+ **/Pods/**"] { args += ["--filter", f] }
         for x in ["build/", ".gradle/", "DerivedData/", ".rigwatch-dd/", ".rigwatch-out/", ".cxx/", ".kotlin/", ".externalNativeBuild/"] { args += ["--exclude", x] }
-        for k in keep { args += ["--exclude", "/" + k + "/"] }
+        if nearby(host) { args.append("--whole-file") }
+        for k in Set(keep + derivedDirs(root)) { args += ["--exclude", "/" + k + "/"] }
         let t0 = Date(), limit = 3600.0
         var r = Sh.run("/usr/bin/rsync", args + [root + "/", host + ":" + dest + "/"], timeout: limit, started: { copyPid = $0 })
         copyPid = 0
@@ -442,6 +476,42 @@ enum Offload {
         }
         return r
     }
+
+    /// Xcode DerivedData folders inside a worktree (a `-derivedDataPath` such as `.dd`), whatever their name and
+    /// whether or not git ignores them: tens of GB the other Mac rebuilds on its own. Found by what Xcode keeps in
+    /// them, up to three levels down.
+    static func derivedDirs(_ root: String) -> [String] {
+        let fm = FileManager.default, skip: Set = [".git", "node_modules", "Pods", "build", ".gradle"]
+        var out: [String] = [], level = [""]
+        for _ in 0..<3 {
+            var next: [String] = []
+            for rel in level {
+                for name in (try? fm.contentsOfDirectory(atPath: root + "/" + rel)) ?? [] where !skip.contains(name) {
+                    let r = rel.isEmpty ? name : rel + "/" + name, full = root + "/" + r
+                    var dir: ObjCBool = false
+                    guard fm.fileExists(atPath: full, isDirectory: &dir), dir.boolValue, (try? fm.destinationOfSymbolicLink(atPath: full)) == nil else { continue }
+                    if ["ModuleCache.noindex", "Index.noindex", "Build/Intermediates.noindex"].contains(where: { fm.fileExists(atPath: full + "/" + $0) }) { out.append(r) }
+                    else if !name.hasSuffix(".xcodeproj"), !name.hasSuffix(".xcworkspace"), !name.hasSuffix(".app") { next.append(r) }
+                }
+            }
+            level = next
+        }
+        return out
+    }
+
+    /// A Mac on a Thunderbolt bridge or the local network: compressing and diffing the copy only costs CPU there
+    /// (measured over Thunderbolt with this Mac busy: 24 MB/s with -z, 41 MB/s with --whole-file and no -z).
+    static func nearby(_ host: String) -> Bool {
+        nearbyLock.lock(); defer { nearbyLock.unlock() }
+        if let n = nearbyHosts[host] { return n }
+        let name = Sh.run("/usr/bin/ssh", ["-G", host], timeout: 5).out.split(separator: "\n")
+            .first { $0.hasPrefix("hostname ") }.map { String($0.dropFirst(9)) } ?? host
+        let n = name.hasSuffix(".local") || name.range(of: #"^(?:169\.254|10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\."#, options: .regularExpression) != nil
+        nearbyHosts[host] = n
+        return n
+    }
+    private static var nearbyHosts: [String: Bool] = [:]
+    private static let nearbyLock = NSLock()
 
     static let usedStamp = ".rigwatch-used"
     /// The rsync of a copy in progress, stopped with the build that started it.

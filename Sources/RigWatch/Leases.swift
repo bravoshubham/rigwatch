@@ -111,7 +111,7 @@ enum Leases {
     static let gradleDevice = try! NSRegularExpression(pattern: #"gradlew?\s[^;&|]*\b(?:install\w*|connected\w*Test)\b"#)
 
     static func namedDevices(_ cmd: String) -> [String] {
-        var ids = Set(Rules.matches(Rules.deviceIds, cmd))
+        var ids = Set(Rules.localDeviceIds(cmd))
         let serials = Rules.matches(serialArg, cmd, group: 1).filter { !ids.contains($0) }
         let pick = cmd.contains("ANDROID_SERIAL=") || cmd.range(of: #"(?<![\w-])-s\s"#, options: .regularExpression) != nil
         let bare = !pick && Rules.has(adbBare, cmd), gradle = !pick && Rules.has(gradleDevice, cmd)

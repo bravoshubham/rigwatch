@@ -166,6 +166,16 @@ enum Rules {
         ("ios", rx(#"\bsimctl\b|\bxcodebuild\b|\bmaestro\b|\bdevicectl\b"#)),
     ]
     static let deviceIds = rx(#"emulator-\d+|[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}"#)
+    /// `ssh HOST …` and its arguments (quoted ones included): what runs on another Mac.
+    static let sshPart = rx(#"(?<![\w-])ssh(?:\s+(?:'[^']*'|"(?:[^"\\]|\\.)*"|[^\s;&|'"]+))*"#)
+
+    /// The emulators and simulators of this Mac a command names. Not what it runs on another Mac over ssh, and a
+    /// UUID only when it is a simulator here (a runtime or a project id is not a device).
+    static func localDeviceIds(_ text: String) -> [String] {
+        let here = sshPart.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        let sims = Sh.home + "/Library/Developer/CoreSimulator/Devices/"
+        return matches(deviceIds, here).filter { $0.hasPrefix("emulator-") || FileManager.default.fileExists(atPath: sims + $0) }
+    }
     static let deviceTool = rx(#"(?i)mobile|device|emulator|simulator|maestro|adb|android|ios"#)
 
     static func classify(_ cmd: String) -> String? {
@@ -204,7 +214,7 @@ enum Rules {
     /// Records that a command used a platform's devices, and which ones it named, for the idle check.
     static func noteUse(_ cmd: String) {
         for u in uses where has(u.rx, cmd) { touch(u.plat) }
-        matches(deviceIds, cmd).forEach(touch)
+        localDeviceIds(cmd).forEach(touch)
     }
 
     /// The AVD or simulator an agent's boot command names, recorded so the clean-up knows an agent started it.
@@ -390,7 +400,7 @@ enum Rules {
         case _ where tool.hasPrefix("mcp__"):
             // Device tools drive emulators and simulators without a shell: note their use so the clean-up leaves the device alone.
             let text = (try? JSONSerialization.data(withJSONObject: ti)).map { String(decoding: $0, as: UTF8.self) } ?? ""
-            let ids = matches(deviceIds, text)
+            let ids = localDeviceIds(text)
             ids.forEach(touch)
             if ids.isEmpty && has(deviceTool, tool) { touch("any-device") }
             return nil
@@ -514,8 +524,14 @@ enum Rules {
         // Past the limit, a build another Mac is being readied for waits for that Mac, up to 20 more minutes, rather
         // than starting here on top of the builds that are already making this Mac slow.
         let waitForPeer = { (w: TimeInterval) in root != nil && Offload.preparing != nil && w < maxWait + 1200 }
+        // Past the limit on an overloaded Mac that has other Macs to send builds to, one build per pool starts here
+        // anyway; the rest go on waiting for a slot or another Mac, instead of all starting at once.
+        var loadAt = Date.distantPast, overloaded = false, toldHold = false
         while true {
             let waited = Date().timeIntervalSince(t0)
+            if root != nil, waited > maxWait, Date().timeIntervalSince(loadAt) > 20 { overloaded = Peers.hereIsBusy(Peers.here()); loadAt = Date() }
+            let hold = root != nil && waited > maxWait && overloaded
+            var holding = false
             let ahead: [BuildJob]? = withJobs { j in
                 guard let i = j.firstIndex(where: { $0.pid == me.pid }) else { j.append(me); return [] }
                 // First come, first served within the pool; the other pool's line does not hold this one up.
@@ -523,7 +539,9 @@ enum Rules {
                 if j[i].force == true { forced = true }
                 else if queue, !(head?.pid == me.pid && fits(p, me.weight, j, s)) {
                     // Never wait for ever: past the limit it starts anyway.
-                    guard waited > maxWait, !waitForPeer(waited) else { return j.filter { pool($0) == p && ($0.state == "running" || ($0.state == "waiting" && $0.since < me.since)) } }
+                    let behind = j.filter { pool($0) == p && ($0.state == "running" || ($0.state == "waiting" && $0.since < me.since)) }
+                    guard waited > maxWait, !waitForPeer(waited) else { return behind }
+                    if hold, j.contains(where: { $0.overflow == true && $0.state == "running" && pool($0) == p }) { holding = true; return behind }
                     overflow = true; j[i].overflow = true
                 }
                 j[i].state = "running"; j[i].since = Date(); return nil
@@ -533,6 +551,10 @@ enum Rules {
             if !toldPeer, Date().timeIntervalSince(t0) > maxWait, let mac = Offload.preparing, waitForPeer(Date().timeIntervalSince(t0)) {
                 say("RigWatch: \(mac) is getting a copy of this worktree; this build waits for it (up to 20 more min) instead of starting here.")
                 toldPeer = true
+            }
+            if holding, !toldHold {
+                say("RigWatch: this Mac is overloaded and a build has already started past the wait, so this one goes on waiting for a slot here or another Mac (tried every 20 s).")
+                toldHold = true
             }
             let msg = ahead.map { "\($0.kind) \($0.state) in \(($0.cwd as NSString).lastPathComponent)" }.joined(separator: "; ")
             if msg != last {
@@ -1039,8 +1061,12 @@ enum Rules {
 
     static func status() -> String {
         let s = RuleSettings.load(), j = jobs()
-        var out = ["rules \(s.paused ? "PAUSED" : "on") · hook \(hookInstalled() ? "installed" : "not installed") · clean-up agent \(agentInstalled() ? "installed" : "not installed")",
-                   "memory pressure \(pressure()) (1 normal, 2 warning, 4 critical) · slot units in use (a build takes 2): Android \(load(j, pool: "android")) of \(cap("android", s)), iOS \(load(j, pool: "ios")) of \(cap("ios", s)), \(load(j)) of \(limit(s)) allowed in all"]
+        // A Mac that only takes other Macs' builds has no agent sessions of its own to hook.
+        let hook = hookInstalled() ? "hook installed" : s.shareDevices ? "build peer (no hook: no agent sessions here)" : "hook not installed"
+        let over = j.filter { $0.overflow == true && $0.state == "running" }.count
+        var out = ["rules \(s.paused ? "PAUSED" : "on") · \(hook) · clean-up agent \(agentInstalled() ? "installed" : "not installed")",
+                   "memory pressure \(pressure()) (1 normal, 2 warning, 4 critical) · slot units in use (a build takes 2): Android \(load(j, pool: "android")) of \(cap("android", s)), iOS \(load(j, pool: "ios")) of \(cap("ios", s)), \(load(j)) of \(limit(s)) allowed in all"
+                   + (over == 0 ? "" : " · \(over) build\(over == 1 ? "" : "s") started past the \(s.maxWaitMinutes)-min wait, over the limit")]
         out += j.map { "  \($0.state.padding(toLength: 8, withPad: " ", startingAt: 0)) \($0.kind.padding(toLength: 10, withPad: " ", startingAt: 0)) \(Int(Date().timeIntervalSince($0.since))) s  \(Views.tilde($0.cwd))  \($0.cmd.prefix(80))" }
         let procs = ProcSampler().sample()
         out += outsideQueue(procs).map { "  outside  \($0.kind.padding(toLength: 10, withPad: " ", startingAt: 0)) pid \($0.pid)  \($0.cwd.map(Views.tilde) ?? "?")  \($0.reason)" }

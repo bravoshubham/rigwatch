@@ -178,8 +178,10 @@ struct Ticks: Shape {
         for i in 0..<count {
             let a = Double(i) / Double(count) * 2 * .pi - .pi / 2
             let len: CGFloat = i % 5 == 0 ? 4.5 : 2
-            p.move(to: CGPoint(x: c.x + cos(a) * R, y: c.y + sin(a) * R))
-            p.addLine(to: CGPoint(x: c.x + cos(a) * (R - len), y: c.y + sin(a) * (R - len)))
+            // CGFloat on both sides: Xcode 26's compiler finds cos(Double) * CGFloat ambiguous.
+            let dx = CGFloat(Darwin.cos(a)), dy = CGFloat(Darwin.sin(a))
+            p.move(to: CGPoint(x: c.x + dx * R, y: c.y + dy * R))
+            p.addLine(to: CGPoint(x: c.x + dx * (R - len), y: c.y + dy * (R - len)))
         }
         return p
     }

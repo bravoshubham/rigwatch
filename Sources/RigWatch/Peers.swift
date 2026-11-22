@@ -350,7 +350,20 @@ enum Peers {
         case "hold": return hold(Array(a.dropFirst()))
         case "run": return run(Array(a.dropFirst()))
         case "install" where a.count >= 2:
-            do { let i = try install(on: a[1], share: a.contains("--share")); print("RigWatch \(i.version) on \(i.name), sharing \(i.sharing ? "on" : "off")"); return 0 }
+            do {
+                let i = try install(on: a[1], share: a.contains("--share"))
+                print("RigWatch \(i.version) on \(i.name), sharing \(i.sharing ? "on" : "off")")
+                guard a.contains("--share") else {
+                    print("This Mac sends it nothing until it is allowed here: RigWatch peer install \(a[1]) --share, or Allow on the Device Manager page."); return 0
+                }
+                // Sharing was asked for: this Mac may use it now. A Mac already listed under another name (an SSH alias) keeps that name.
+                let known = load().first { p in p.host == a[1] || seen()[p.host]?.info.name == i.name }
+                let host = known?.host ?? a[1]
+                if known?.allowed != true { setAllowed(host, true) }
+                _ = probe(host)
+                print("Allowed here as \(host): builds and emulators can go to it from now on (Device Manager page: Disallow to stop).")
+                return 0
+            }
             catch let f as DeviceManager.Failure { Rules.say(f.message); return 1 } catch { Rules.say("\(error)"); return 1 }
         case "refresh": refreshAllowed(); return 0
         case "sync": return Offload.sync(Array(a.dropFirst()))
@@ -373,6 +386,8 @@ enum Peers {
                 for b in sh.back { print("  back: \(b.from) -> \(b.to)") }
                 if sh.gradleResults { print("  back: build/outputs, reports, test-results") }
                 if !sh.keep.isEmpty { print("  keep: \(sh.keep.joined(separator: ", "))") }
+                let dd = Offload.derivedDirs(sh.root)
+                print("  not copied (DerivedData): \(dd.isEmpty ? "none found" : dd.joined(separator: ", "))")
             } else { print("stays here: \(why)") }
             return 0
         case "authorize": return authorize(Array(a.dropFirst()))
