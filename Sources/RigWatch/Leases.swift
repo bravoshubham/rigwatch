@@ -64,9 +64,12 @@ enum Leases {
         guard !ids.isEmpty else { return nil }
         let now = Date(), owner = agentProcess()
         var others: [Lease] = []
+        // A lease taken while an emulator booted names its AVD (avd:NAME), not the serial a command uses.
+        let devices = ids.contains { $0.hasPrefix("emulator-") } && live().contains { $0.device.hasPrefix("avd:") } ? DeviceManager.running() : []
         edit { list in
             for id in ids {
-                if let i = list.firstIndex(where: { $0.device == id }) {
+                let dev = devices.first { $0.id == id }
+                if let i = list.firstIndex(where: { $0.device == id || dev.map($0.covers) == true }) {
                     if list[i].session == session {
                         list[i].until = max(list[i].until, now.addingTimeInterval(renewOnUse))
                         if list[i].isImplicit, list[i].ownerPid == 0, let a = owner { list[i].ownerPid = a.pid; list[i].ownerStart = a.start }

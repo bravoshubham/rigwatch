@@ -19,6 +19,9 @@ struct RuleSettings: Codable, Equatable {
     var offloadMode = "balanced" // balanced: only to a clearly less busy Mac; spare: to any Mac that can take it, however busy
     var busyAt = 0.85            // overloaded from this CPU use (share of all cores, or 1-minute load per core)
     var memFreeMin = 15          // overloaded below this much free memory (%)
+    var maxLoadPerCore = 4.0     // above this 1-minute load per core a queued build waits, unless none of its pool runs
+    var integratorsFile = ""     // a team's integrator list (repository name: worktree, since), read beside RigWatch's own
+    var integratorMode = "warn"  // a build outside a repository's integrator worktree: warn, or refuse
     var limitVirtual = true      // at most this many emulators and simulators running at once
     var maxEmulators = 2
     var maxSimulators = 2
@@ -179,8 +182,33 @@ enum Rules {
     static let deviceTool = rx(#"(?i)mobile|device|emulator|simulator|maestro|adb|android|ios"#)
 
     static func classify(_ cmd: String) -> String? {
-        heavy.first { has($0.tool, cmd) && !($0.skip.map { has($0, cmd) } ?? false) }?.kind
+        let cmd = runs(cmd)
+        return heavy.first { has($0.tool, cmd) && !($0.skip.map { has($0, cmd) } ?? false) }?.kind
     }
+
+    /// What a shell command runs, without the text it only carries: heredoc bodies (a script being written, a
+    /// message) and quoted strings, except those a shell runs (`sh -c '…'`, `bash <<EOF`). A build named in them
+    /// is not a build, and a device id in them is not a device being used.
+    static func runs(_ cmd: String) -> String {
+        guard cmd.contains("<<") || cmd.contains("'") || cmd.contains("\"") else { return cmd }
+        var out = "", lines = cmd.components(separatedBy: "\n")[...]
+        while let line = lines.popFirst() {
+            out += line + "\n"
+            for m in heredoc.matches(in: line, range: NSRange(line.startIndex..., in: line)) {
+                guard let tr = Range(m.range(at: 2), in: line) else { continue }
+                let tag = String(line[tr]), shell = Range(m.range(at: 0), in: line).map { has(shellRuns, String(line[..<$0.lowerBound])) } ?? false
+                while let body = lines.popFirst() {
+                    if body.trimmingCharacters(in: CharacterSet(charactersIn: "\t")) == tag { out += body + "\n"; break }
+                    if shell { out += body + "\n" }
+                }
+            }
+        }
+        return quoted.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out), withTemplate: "$1''")
+    }
+    static let heredoc = rx(#"<<-?\s*(['"]?)(\w+)\1"#)
+    static let shellRuns = rx(#"(?:^|[\s;&|(/])(?:ba|z|da)?sh(?:\s+-\w+)*\s*$"#)
+    /// A quoted string not given to `-c` (which a shell runs); the template keeps what precedes it.
+    static let quoted = rx(#"((?<!-c)(?<!-c\s)(?<!-c\s\s)(?:^|[^\\\w]))(?:'[^']*'|"(?:[^"\\]|\\.)*")"#)
 
     /// Threads for the next build: the Rules' number at least, more when few builds run, so a build alone on the
     /// Mac isn't held to a third of its cores. Two cores always stay free for everything else.
@@ -213,6 +241,7 @@ enum Rules {
 
     /// Records that a command used a platform's devices, and which ones it named, for the idle check.
     static func noteUse(_ cmd: String) {
+        let cmd = runs(cmd)
         for u in uses where has(u.rx, cmd) { touch(u.plat) }
         localDeviceIds(cmd).forEach(touch)
     }
@@ -333,8 +362,11 @@ enum Rules {
         }
         // Leases: a session naming its own leased device keeps the lease going; one naming another's is warned.
         let tool = j["tool_name"] as? String ?? "", ti = j["tool_input"] as? [String: Any] ?? [:]
-        let text = tool == "Bash" ? ti["command"] as? String ?? "" : (try? JSONSerialization.data(withJSONObject: ti)).map { String(decoding: $0, as: UTF8.self) } ?? ""
-        if out?["permissionDecision"] == nil, !tool.hasPrefix("mcp__rigwatch__"), let note = Leases.noteCommand(text, session: j["session_id"] as? String) {
+        // Only what runs on a device: a shell command (not the text it carries) or a device tool's arguments, not a
+        // message to another session or a file being written that happens to name a device.
+        let text = tool == "Bash" ? runs(ti["command"] as? String ?? "")
+            : has(deviceTool, tool) ? (try? JSONSerialization.data(withJSONObject: ti)).map { String(decoding: $0, as: UTF8.self) } ?? "" : ""
+        if out?["permissionDecision"] == nil, !text.isEmpty, !tool.hasPrefix("mcp__rigwatch__"), let note = Leases.noteCommand(text, session: j["session_id"] as? String) {
             var o = out ?? ["hookEventName": "PreToolUse"]
             o["additionalContext"] = [o["additionalContext"] as? String, note].compactMap { $0 }.joined(separator: "\n\n")
             out = o
@@ -362,10 +394,15 @@ enum Rules {
             case .leave: return nil
             case .deny(let why): return denial(why)
             case .wrap(let cmd, let kind):
+                let original = ti["command"] as? String ?? ""
+                if let root = roots(original, cwd: j["cwd"] as? String ?? FileManager.default.currentDirectoryPath).first, let other = Integrators.other(for: root) {
+                    if s.integratorMode == "refuse" { return denial(Integrators.message(other, refuse: true)) }
+                    out["additionalContext"] = "RigWatch: " + Integrators.message(other, refuse: false)
+                }
                 ti["command"] = cmd
                 if ti["run_in_background"] as? Bool != true, wouldWait(kind, cmd, s) {
                     ti["run_in_background"] = true
-                    out["additionalContext"] = "RigWatch: every \(pool(kind: kind, cmd: cmd) == "ios" ? "iOS" : "Android") build slot on this machine is busy, so this command was queued and moved to the background. You will be notified when it finishes; carry on with other work meanwhile."
+                    out["additionalContext"] = ((out["additionalContext"] as? String).map { $0 + "\n\n" } ?? "") + "RigWatch: every \(pool(kind: kind, cmd: cmd) == "ios" ? "iOS" : "Android") build slot on this machine is busy, so this command was queued and moved to the background. You will be notified when it finishes; carry on with other work meanwhile."
                 }
             }
         case _ where tool.hasSuffix("__ctx_execute") && ti["language"] as? String == "shell":
@@ -467,6 +504,7 @@ enum Rules {
     }
 
     static var child: pid_t = 0
+    static var stoppedBy: Int32?   // the signal that stopped this build from outside
 
     /// `RigWatch run [--kind K] -- CMD...`: waits for a slot (first come, first served), then runs CMD
     /// at utility priority and passes its exit status on.
@@ -503,7 +541,7 @@ enum Rules {
         for sig in [SIGTERM, SIGINT, SIGHUP] {
             signal(sig, SIG_IGN)   // the child gets default handlers back (POSIX_SPAWN_SETSIGDEF)
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .global())
-            src.setEventHandler { if child > 0 { stopTree(child, sig) } else { release(); exit(128 + sig) } }
+            src.setEventHandler { stoppedBy = sig; if child > 0 { stopTree(child, sig) } else { release(); exit(128 + sig) } }
             src.resume(); sources.append(src)
         }
         // Another Mac first, when this one is busy or the build would wait for a slot.
@@ -514,7 +552,12 @@ enum Rules {
         withJobs { $0.append(me) }
         // A new worktree gets node_modules, Pods and Xcode caches matching its lockfiles before anything runs.
         let roots = roots(line, cwd: me.cwd)
-        for r in roots { for n in DepCache.prepare(r) { say("RigWatch: " + n) } }
+        for r in roots {
+            for n in DepCache.prepare(r) { say("RigWatch: " + n) }
+            let c = DepCache.checkIfChanged(r)
+            for n in c.fixed { say("RigWatch: " + n) }
+            for n in c.problems { say("RigWatch: problem: " + n) }
+        }
         if k == "xcodebuild" { for n in DepCache.prepareDerivedData(cmd: line, cwd: me.cwd) { say("RigWatch: " + n) } }
         let queue = s.queueBuilds && !s.paused
         let t0 = Date(), maxWait = TimeInterval(ProcessInfo.processInfo.environment["RIGWATCH_MAX_WAIT"].flatMap(Int.init) ?? max(1, s.maxWaitMinutes) * 60)   // seconds, for tests
@@ -524,18 +567,25 @@ enum Rules {
         let waitForPeer = { (w: TimeInterval) in root != nil && Offload.preparing != nil && w < maxWait + 1200 }
         // Past the limit on an overloaded Mac that has other Macs to send builds to, one build per pool starts here
         // anyway; the rest go on waiting for a slot or another Mac, instead of all starting at once.
-        var loadAt = Date.distantPast, overloaded = false, toldHold = false
+        var loadAt = Date.distantPast, overloaded = false, toldHold = false, toldLoad = false
+        let cores = Double(ProcessInfo.processInfo.activeProcessorCount)
         while true {
             let waited = Date().timeIntervalSince(t0)
-            if root != nil, waited > maxWait, Date().timeIntervalSince(loadAt) > 20 { overloaded = Peers.hereIsBusy(Peers.here()); loadAt = Date() }
-            let hold = root != nil && waited > maxWait && overloaded
-            var holding = false
+            var la = [Double](repeating: 0, count: 3); getloadavg(&la, 3)
+            // Saturated (sessions' tools and simulators can push the load far past the cores): another build only adds to it.
+            let loaded = la[0] / cores > s.maxLoadPerCore
+            if waited > maxWait, Date().timeIntervalSince(loadAt) > 20 { overloaded = loaded || Peers.hereIsBusy(Peers.here()); loadAt = Date() }
+            let hold = waited > maxWait && overloaded
+            let integ = Integrators.all()
+            var holding = false, heldByLoad = false
             let ahead: [BuildJob]? = withJobs { j in
                 guard let i = j.firstIndex(where: { $0.pid == me.pid }) else { j.append(me); return [] }
                 // First come, first served within the pool; the other pool's line does not hold this one up.
-                let head = j.filter { $0.state == "waiting" && pool($0) == p }.min { $0.since < $1.since }
+                // The repository's integrator goes first; then first come, first served.
+                let head = j.filter { $0.state == "waiting" && pool($0) == p }
+                    .min { (Integrators.isIntegrator($0.cwd, integ) ? 0 : 1, $0.since) < (Integrators.isIntegrator($1.cwd, integ) ? 0 : 1, $1.since) }
                 if j[i].force == true { forced = true }
-                else if queue, !(head?.pid == me.pid && fits(p, me.weight, j, s)) {
+                else if queue, !(head?.pid == me.pid && fits(p, me.weight, j, s)) || (loaded && j.contains { $0.state == "running" && pool($0) == p } && { heldByLoad = true; return true }()) {
                     // Never wait for ever: past the limit it starts anyway.
                     let behind = j.filter { pool($0) == p && ($0.state == "running" || ($0.state == "waiting" && $0.since < me.since)) }
                     guard waited > maxWait, !waitForPeer(waited) else { return behind }
@@ -549,6 +599,10 @@ enum Rules {
             if !toldPeer, Date().timeIntervalSince(t0) > maxWait, let mac = Offload.preparing, waitForPeer(Date().timeIntervalSince(t0)) {
                 say("RigWatch: \(mac) is getting a copy of this worktree; this build waits for it (up to 20 more min) instead of starting here.")
                 toldPeer = true
+            }
+            if heldByLoad, !toldLoad {
+                say("RigWatch: this Mac's load is \(Int(la[0])) on \(Int(cores)) cores, past the Rules' \(s.maxLoadPerCore.formatted()) per core: this build waits until it eases (or for another Mac).")
+                toldLoad = true
             }
             if holding, !toldHold {
                 say("RigWatch: this Mac is overloaded and a build has already started past the wait, so this one goes on waiting for a slot here or another Mac (tried every 20 s).")
@@ -592,8 +646,14 @@ enum Rules {
         let code = spawn(["/usr/sbin/taskpolicy", "-c", "utility"] + a)
         release()
         if code == 0 { for r in roots { DepCache.seed(r) } }   // the next worktree with these lockfiles starts from here
-        BuildHistory.add(BuildRecord(kind: k, pool: p, cwd: me.cwd, cmd: me.cmd, session: session, queuedAt: t0, startedAt: started,
-                                     endedAt: Date(), waited: waited, overflow: overflow, forced: forced, releasedEarly: early, exit: code))
+        var rec = BuildRecord(kind: k, pool: p, cwd: me.cwd, cmd: me.cmd, session: session, queuedAt: t0, startedAt: started,
+                              endedAt: Date(), waited: waited, overflow: overflow, forced: forced, releasedEarly: early, exit: code)
+        if let sig = stoppedBy {
+            // Stopped from outside (the session interrupted it, the Builds page, a kill): not the build failing.
+            rec.signal = sig
+            log("builds: stopped by \(sig == SIGTERM ? "SIGTERM" : sig == SIGINT ? "SIGINT" : sig == SIGHUP ? "SIGHUP" : "signal \(sig)") from outside, not a build failure: \(me.cmd.prefix(120))")
+        }
+        BuildHistory.add(rec)
         withExtendedLifetime(sources) {}
         return code
     }
@@ -1071,6 +1131,11 @@ enum Rules {
         for plat in ["android", "ios"] {
             let (phys, virt) = devices(plat, procs: procs)
             out.append("\(plat): physical \(phys.isEmpty ? "none" : phys.joined(separator: ", ") + (plat == "ios" ? " (installs ask the user)" : "")); virtual \(virt.isEmpty ? "none" : virt.map { "\($0.name) \($0.id) up \(Fmt.ago($0.started).replacingOccurrences(of: " ago", with: ""))" }.joined(separator: ", "))")
+            // Booted outside acquire_device (a test runner, a session's own simctl boot): over the cap or held by no lease.
+            let cap = plat == "ios" ? s.maxSimulators : s.maxEmulators, live = Leases.live()
+            let unleased = virt.filter { d in !live.contains { !$0.isImplicit && $0.covers(d) } }
+            if s.limitVirtual, virt.count > cap { out.append("  ⚠️ \(virt.count) \(plat == "ios" ? "simulators" : "emulators") running, over the Rules' \(cap)") }
+            if !unleased.isEmpty { out.append("  not leased through acquire_device: \(unleased.map(\.name).joined(separator: ", "))") }
         }
         let leases = Leases.live()
         out.append("leases: " + (leases.isEmpty ? "none" : leases.map { $0.isImplicit ? "\($0.device) in use by session \($0.session) (no lease)" : "\($0.name) (\($0.device)) to session \($0.session) until \(Leases.time($0.until))\($0.purpose.isEmpty ? "" : " for \"\($0.purpose)\"")" }.joined(separator: "; ")))
@@ -1093,13 +1158,14 @@ enum CLI {
     RigWatch mcp                        MCP server: agents acquire and release emulators, simulators and phones
     RigWatch peer info|hold|run         what another Mac's RigWatch uses to borrow this Mac's devices (over SSH)
     RigWatch peer doctor HOST           how another Mac is set up to take this Mac's builds
+    RigWatch integrator claim|release [PATH] | list   one builder per repository: its builds go first, others are pointed at it
     RigWatch iphone list                paired iPhones here and on the allowed Macs
     RigWatch iphone install APP [--device NAME]  install an .app on a real iPhone, after the user allows it in RigWatch
     RigWatch peer install HOST [--share]  copy this RigWatch to another Mac over SSH (and turn sharing on there)
     RigWatch version                    the version of this RigWatch
     RigWatch install|uninstall          turn the rules on or off (Claude Code hook, MCP device manager, clean-up agent)
     """
-    static let commands: Set = ["run", "progress", "hook", "mcp", "peer", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version", "iphone"]
+    static let commands: Set = ["run", "progress", "hook", "mcp", "peer", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version", "iphone", "integrator"]
 
     static func main(_ args: [String]) -> Int32? {
         guard let c = args.first, commands.contains(c) else { return nil }
@@ -1109,6 +1175,7 @@ enum CLI {
         case "hook": Rules.hook()   // nothing printed = the tool call goes ahead unchanged
         case "mcp": return MCPServer.main()
         case "peer": return Peers.main(a)
+        case "integrator": return Integrators.main(a)
         case "iphone": return IPhones.main(a)
         case "progress":   // what the Builds page shows for each running queued build here (for checking)
             let ps = ProcSampler().sample(), reader = BuildProgress.Reader()
@@ -1141,6 +1208,7 @@ struct BuildRecord: Codable, Identifiable {
     let overflow: Bool, forced: Bool, releasedEarly: Bool
     let exit: Int32
     var host: String? = nil        // the other Mac it ran on (run_on_mac)
+    var signal: Int32? = nil       // stopped from outside by this signal: not a failure of the build
     var id: Date { queuedAt }
     var ran: TimeInterval { endedAt.timeIntervalSince(startedAt) }
 }

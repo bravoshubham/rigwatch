@@ -463,7 +463,12 @@ enum MCPServer {
                 var notes = DepCache.prepare(root)
                 if let dd = str("derived_data_path") { notes += DepCache.prepareDerivedData(cmd: "xcodebuild -derivedDataPath '\(dd)'", cwd: root) }
                 let have = DepCache.spots(root).map { s in "\(s.rel.isEmpty ? "" : s.rel + "/")\(s.kind.folder): \(FileManager.default.fileExists(atPath: DepCache.path(root, s.rel) + "/" + s.kind.folder) ? "present" : "missing (no match for this lockfile yet; install it, and RigWatch keeps it for the next worktree)")" }
-                out = ["worktree": Views.tilde(root), "done": notes.isEmpty ? ["nothing to copy"] : notes, "now": have]
+                let c = DepCache.check(root)
+                guard c.problems.isEmpty else {
+                    throw DeviceManager.Failure(message: "The worktree \(Views.tilde(root)) is not ready to build:\n- " + c.problems.joined(separator: "\n- ")
+                        + ((notes + c.fixed).isEmpty ? "" : "\nDone meanwhile:\n- " + (notes + c.fixed).joined(separator: "\n- ")))
+                }
+                out = ["worktree": Views.tilde(root), "done": (notes + c.fixed).isEmpty ? ["nothing to copy or fix"] : notes + c.fixed, "now": have, "checked": "every package.json dependency installed at the lockfile's version; Pods point at this worktree; included xcconfigs present; React Native codegen present"]
             default: throw DeviceManager.Failure(message: "Unknown tool \(name)")
             }
             let text = (out as? String) ?? String(decoding: (try? JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])) ?? Data(), as: UTF8.self)

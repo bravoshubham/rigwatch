@@ -237,6 +237,8 @@ enum Offload {
 
     /// The command with every Gradle and xcodebuild run going through `peer exec` (an `xcrun` in front is dropped).
     static func wrap(_ cmd: String) -> String? {
+        // The session asked for this Mac (inline or exported): it is queued here as usual.
+        if cmd.range(of: #"\bRIGWATCH_(?:NO_PEER|HERE)=(?:1|true|yes)\b"#, options: .regularExpression) != nil { return nil }
         var out = cmd, n = 0
         for (kind, tool, skip) in Rules.heavy where kind != "install" {
             for m in tool.matches(in: out, range: NSRange(out.startIndex..., in: out)).reversed() {
@@ -265,10 +267,15 @@ enum Offload {
         let line = shellJoin(a), cwd = FileManager.default.currentDirectoryPath
         let session = ProcessInfo.processInfo.environment["CLAUDE_CODE_SESSION_ID"]
         func here(_ why: String?) -> Int32 {
-            if let why { Rules.say("RigWatch: this \(kind == "gradle" ? "Gradle" : "xcodebuild") run stays on this Mac: \(why).") }
+            if let why {
+                Rules.say("RigWatch: this \(kind == "gradle" ? "Gradle" : "xcodebuild") run stays on this Mac: \(why).")
+                Rules.log("offload: \(kind) for session \(session ?? "?") stays on this Mac after all: \(why)")
+            }
             return Rules.run(["--here", "--kind", kind, "--", "/bin/zsh", "-c", line])
         }
-        guard let host = ProcessInfo.processInfo.environment["RIGWATCH_BUILD_ON"], let info = Peers.seen()[host]?.info else { return here(nil) }
+        let env = ProcessInfo.processInfo.environment
+        if ["1", "true", "yes"].contains(env["RIGWATCH_NO_PEER"] ?? env["RIGWATCH_HERE"] ?? "") { return here("RIGWATCH_NO_PEER is set") }
+        guard let host = env["RIGWATCH_BUILD_ON"], let info = Peers.seen()[host]?.info else { return here(nil) }
         var why = ""
         guard let sh = shape(["/bin/zsh", "-c", line], kind: kind, cwd: cwd, why: &why) else { return here(why) }
         if sh.emulator, info.avds.isEmpty, !info.emulators.contains(where: \.free) { return here("\(info.name) has no Android emulator") }
