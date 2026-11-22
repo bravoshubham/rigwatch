@@ -297,7 +297,11 @@ enum Offload {
     static let failuresFile = Rules.dir + "/offload-failures.json", copiesFile = Rules.dir + "/remote-copies.json"
     static let skipFor: TimeInterval = 6 * 3600
     static func failures() -> [String: Peers.Failure] {
-        FileManager.default.contents(atPath: failuresFile).flatMap { try? Leases.decoder.decode([String: Peers.Failure].self, from: $0) } ?? [:]
+        let all = FileManager.default.contents(atPath: failuresFile).flatMap { try? Leases.decoder.decode([String: Peers.Failure].self, from: $0) } ?? [:]
+        // Entries older than the skip have no effect; drop them from the file so it shows only what still applies.
+        let live = all.filter { Date().timeIntervalSince($0.value.at) < skipFor }
+        if live.count < all.count { Rules.write(try? Leases.encoder.encode(live), to: failuresFile) }
+        return live
     }
     static func noteFailure(_ host: String, _ root: String, _ why: String?) {
         var all = failures().filter { Date().timeIntervalSince($0.value.at) < skipFor }
@@ -456,15 +460,29 @@ enum Offload {
         }
         stopOrphans(host: host, dest: dest)
         // The stamp tells that Mac's clean-up when the copy was last used (rsync keeps the folders' own times).
-        var args = [nearby(host) ? "-a" : "-az", "--delete", "-e", (["/usr/bin/ssh"] + Peers.sshOpts).joined(separator: " "),
+        var args = [nearby(host) ? "-a" : "-az", "--delete", "--progress", "-e", (["/usr/bin/ssh"] + Peers.sshOpts).joined(separator: " "),
                     "--rsync-path", "mkdir -p \(Rules.quote(dest)) && touch \(Rules.quote(dest))/\(usedStamp) && rsync", "--exclude", "/" + usedStamp]
         for f in ["- node_modules/**/android/build/", "- **/node_modules/**/android/build/", "+ node_modules/**", "+ **/node_modules/**", "+ Pods/**", "+ **/Pods/**"] { args += ["--filter", f] }
+        // React Native's iOS codegen writes headers the Pods project compiles into build/generated/ios: those go too.
+        for b in ["/build/", "/ios/build/"] {
+            for f in ["+ \(b)", "+ \(b)generated/", "+ \(b)generated/ios/", "+ \(b)generated/ios/**", "- \(b)**"] { args += ["--filter", f] }
+        }
         for x in ["build/", ".gradle/", "DerivedData/", ".rigwatch-dd/", ".rigwatch-out/", ".cxx/", ".kotlin/", ".externalNativeBuild/"] { args += ["--exclude", x] }
         if nearby(host) { args.append("--whole-file") }
         for k in Set(keep + derivedDirs(root)) { args += ["--exclude", "/" + k + "/"] }
         let t0 = Date(), limit = 3600.0
-        var r = Sh.run("/usr/bin/rsync", args + [root + "/", host + ":" + dest + "/"], timeout: limit, started: { copyPid = $0 })
+        var prog = CopyProgress(host: host, root: root, pid: getpid(), pidStart: ProcSampler.startTime(getpid()) ?? 0, since: t0)
+        var wrote = Date.distantPast
+        var r = Sh.run("/usr/bin/rsync", args + [root + "/", host + ":" + dest + "/"], timeout: limit, started: { copyPid = $0 }) { line in
+            // openrsync: "   3000000 100%  363.54MB/s   00:00:00 (xfer#1, to-check=1/4)" once a file is sent.
+            guard line.contains("to-check="), let m = progressLine.firstMatch(in: String(line), range: NSRange(line.startIndex..., in: line)) else { return }
+            let s = String(line), n = { (i: Int) in Range(m.range(at: i), in: s).flatMap { Int64(s[$0]) } ?? 0 }
+            prog.bytes += n(1); prog.files = Int(n(2)); prog.total = Int(n(3))
+            if Date().timeIntervalSince(wrote) > 3 { wrote = Date(); noteProgress(prog) }
+        }
         copyPid = 0
+        noteProgress(nil, removing: prog.id)
+        if r.code == 0 || r.code == 24 { localize(root, on: host, dest: dest) }
         let took = Date().timeIntervalSince(t0)
         noteCopyTime(host, root, took)
         // 24: files vanished while copying, as they do in a worktree a session is working in. The rest got there.
@@ -512,6 +530,54 @@ enum Offload {
     }
     private static var nearbyHosts: [String: Bool] = [:]
     private static let nearbyLock = NSLock()
+
+    /// CocoaPods writes the worktree's absolute path into the Pods project, its xcconfigs and file lists, and Xcode
+    /// keeps it in DerivedData: in the copy there it names this Mac's folder, and the build fails ("Unable to load
+    /// contents of file list"). This points the copy's Pods files at the copy, and removes DerivedData there that was
+    /// copied from here (by RigWatch before 1.11.10), so that Mac builds its own.
+    static func localize(_ root: String, on host: String, dest: String) {
+        let pat = NSRegularExpression.escapedPattern(for: root).replacingOccurrences(of: "#", with: "\\#")
+        var sh = "cd \(Rules.quote(dest)) || exit 0; there=\"$HOME/\(dest)\"; "
+        // No globs: the login shell there may be zsh, which ends the whole command on a pattern that matches nothing.
+        sh += "find . -maxdepth 2 -type d -name Pods | while IFS= read -r d; do LC_ALL=C grep -rlF --null \(Rules.quote(root)) \"$d\" --include='*.xcconfig' --include='*.pbxproj' --include='*.xcfilelist' --include='*.sh' "
+            + "| xargs -0 sed -i '' \"s#\(pat)#$there#g\"; done; "
+        // React Native's .xcode.env.local names this Mac's node by its Homebrew version folder: there, its own node.
+        sh += "n=$(PATH=/opt/homebrew/bin:/usr/local/bin:$PATH command -v node); find . -maxdepth 2 -name .xcode.env.local | while IFS= read -r f; do "
+            + "b=$(sed -n 's/^export NODE_BINARY=//p' \"$f\"); [ -n \"$n\" ] && [ -n \"$b\" ] && [ ! -x \"$b\" ] && sed -i '' \"s#^export NODE_BINARY=.*#export NODE_BINARY=$n#\" \"$f\"; done; "
+        for d in derivedDirs(root) { sh += "[ -f \(Rules.quote(d))/info.plist ] && LC_ALL=C grep -qF \(Rules.quote(root)) \(Rules.quote(d))/info.plist && rm -rf \(Rules.quote(d)); " }
+        sh += "true"
+        let r = Sh.run("/usr/bin/ssh", Peers.sshOpts + [host, sh], timeout: 300)
+        if r.code != 0 { Rules.log("offload: could not point the copy of \(Views.tilde(root)) on \(host) at itself (exit \(r.code)): \(r.err.prefix(200))") }
+    }
+
+    // MARK: copies in progress, for `status` and build_queue
+
+    struct CopyProgress: Codable {
+        var host: String, root: String, pid: Int32, pidStart: UInt64, since: Date
+        var bytes: Int64 = 0, files = 0, total = 0
+        var id: String { key(host, root) + "|\(pid)" }
+        var line: String {
+            let secs = max(1, Date().timeIntervalSince(since))
+            return "copying \(Views.tilde(root)) to \(host): \(Fmt.bytes(UInt64(bytes))) sent"
+                + (total > 0 ? ", files \(files) of \(total)" : "") + ", \(Fmt.bytes(UInt64(Double(bytes) / secs)))/s, \(Int(secs / 60)) min"
+        }
+    }
+    static let progressLine = try! NSRegularExpression(pattern: #"^\s*(\d+)\s+100%.*to-check=(\d+)/(\d+)"#)
+    static let progressFile = Rules.dir + "/copy-progress.json"
+    static let progressLock = NSLock()
+    static func copiesInProgress() -> [CopyProgress] {
+        (FileManager.default.contents(atPath: progressFile).flatMap { try? Leases.decoder.decode([CopyProgress].self, from: $0) } ?? [])
+            .filter { ProcSampler.startTime($0.pid) == $0.pidStart }
+    }
+    static func noteProgress(_ p: CopyProgress?, removing id: String? = nil) {
+        progressLock.lock(); defer { progressLock.unlock() }
+        let fd = open(Rules.dir + "/remote-copies.lock", O_RDWR | O_CREAT, 0o644)
+        if fd >= 0 { flock(fd, LOCK_EX) }
+        defer { if fd >= 0 { close(fd) } }
+        var all = copiesInProgress().filter { $0.id != (p?.id ?? id) }
+        if let p { all.append(p) }
+        Rules.write(try? Leases.encoder.encode(all), to: progressFile)
+    }
 
     static let usedStamp = ".rigwatch-used"
     /// The rsync of a copy in progress, stopped with the build that started it.

@@ -255,7 +255,8 @@ enum Rules {
     static func bootBlock(_ cmd: String) -> String? {
         guard !cmd.contains("RIGWATCH_VIRTUAL=1") else { return nil }
         for b in boot where has(b.rx, cmd) {
-            let (phys, virt) = devices(b.plat)
+            // A real iPhone takes an app only through install_on_iphone, after the user's yes: it never stands in for a simulator.
+            let (all, virt) = devices(b.plat), phys = b.plat == "ios" ? [] : all
             if !phys.isEmpty {
                 return "A physical \(b.plat == "ios" ? "iPhone or iPad" : "Android device") is connected (\(phys.joined(separator: ", "))). Use it instead of booting a virtual one. If a virtual device is really required, put RIGWATCH_VIRTUAL=1 in front of the command, or ask RigWatch for one with the rigwatch MCP tool acquire_device."
             }
@@ -274,20 +275,8 @@ enum Rules {
         return (ds.filter { $0.kind == .phone && $0.state == "device" && !$0.id.contains(":") }.map(\.name), ds.filter { $0.kind == .emulator })
     }
 
-    /// Connected iPhones and iPads, from devicectl (Xcode 15 and later).
-    static func iPhones() -> [String] {
-        let f = NSTemporaryDirectory() + "rigwatch-devicectl-\(getpid()).json"
-        defer { try? FileManager.default.removeItem(atPath: f) }
-        _ = Sh.run("/usr/bin/xcrun", ["devicectl", "list", "devices", "-j", f], timeout: 30)
-        guard let d = FileManager.default.contents(atPath: f), let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
-              let devs = (j["result"] as? [String: Any])?["devices"] as? [[String: Any]] else { return [] }
-        return devs.compactMap { x in
-            let hw = x["hardwareProperties"] as? [String: Any] ?? [:], cp = x["connectionProperties"] as? [String: Any] ?? [:]
-            guard hw["platform"] as? String == "iOS", hw["reality"] as? String != "virtual",
-                  cp["tunnelState"] as? String == "connected" || cp["transportType"] as? String == "wired" else { return nil }
-            return (x["deviceProperties"] as? [String: Any])?["name"] as? String ?? hw["udid"] as? String ?? "iPhone"
-        }
-    }
+    /// Real iPhones and iPads this Mac reaches (devicectl calls simulators "simulated", not "virtual").
+    static func iPhones() -> [String] { IPhones.here().map(\.name) }
 
     // MARK: builds outside the queue
 
@@ -366,7 +355,7 @@ enum Rules {
         var out: [String: Any] = ["hookEventName": "PreToolUse"]
         switch tool {
         case "Bash":
-            if has(iphoneInstall, ti["command"] as? String ?? "") {
+            if has(iphoneInstall, ti["command"] as? String ?? "") || xcodeTestsOnIPhone(ti["command"] as? String ?? "") {
                 return denial("Installing on a real iPhone needs the user's yes each time. Call the rigwatch MCP tool install_on_iphone with the built .app (it asks the user in RigWatch and installs through the Mac the phone is paired with), or run: RigWatch iphone install PATH.app [--device NAME]")
             }
             switch wrap(ti["command"] as? String ?? "", s) {
@@ -412,6 +401,15 @@ enum Rules {
 
     /// Installing on a real iPhone around RigWatch's ask: devicectl or ios-deploy directly, the peer step, or the answers file.
     static let iphoneInstall = rx(#"\bdevicectl\s+device\s+install\b|\bios-deploy\b|\bpeer\s+iphone-install\b|iphone-installs\.(?:json|lock)"#)
+
+    /// xcodebuild test on a real device installs the app there, around the user's yes.
+    static func xcodeTestsOnIPhone(_ cmd: String) -> Bool {
+        guard cmd.contains("xcodebuild"), has(Offload.xcTest, cmd) else { return false }
+        return matches(Offload.destination, cmd, group: 1).map(Offload.unquote).contains { d in
+            d.range(of: #"id=[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}\b"#, options: .regularExpression) != nil
+                || (d.contains("platform=iOS") && !d.contains("Simulator") && !d.contains("generic/"))
+        }
+    }
 
     static func denial(_ why: String) -> [String: Any] {
         ["hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "RigWatch: " + why]
@@ -763,11 +761,10 @@ enum Rules {
         let virt = devs.filter { $0.kind != .phone }
         guard !virt.isEmpty else { return }
         let androidPhys = devs.filter { $0.kind == .phone && $0.state == "device" }.map(\.name)
-        let iosPhys = virt.contains { $0.kind == .simulator } ? iPhones() : []
         let pinned = pins(), now = Date()
         for d in virt {
             let ios = d.kind == .simulator
-            let phys = ios ? iosPhys : androidPhys
+            let phys = ios ? [] : androidPhys   // a real iPhone isn't used in a simulator's place (installs on it ask the user)
             let busy = ios && simBusy(d, procs, save: apply)
             if busy && apply { touch(d.id) }
             let limit = TimeInterval((phys.isEmpty ? s.deviceIdleMinutes : s.deviceIdleWithPhoneMinutes) * 60)
@@ -1068,11 +1065,12 @@ enum Rules {
                    "memory pressure \(pressure()) (1 normal, 2 warning, 4 critical) · slot units in use (a build takes 2): Android \(load(j, pool: "android")) of \(cap("android", s)), iOS \(load(j, pool: "ios")) of \(cap("ios", s)), \(load(j)) of \(limit(s)) allowed in all"
                    + (over == 0 ? "" : " · \(over) build\(over == 1 ? "" : "s") started past the \(s.maxWaitMinutes)-min wait, over the limit")]
         out += j.map { "  \($0.state.padding(toLength: 8, withPad: " ", startingAt: 0)) \($0.kind.padding(toLength: 10, withPad: " ", startingAt: 0)) \(Int(Date().timeIntervalSince($0.since))) s  \(Views.tilde($0.cwd))  \($0.cmd.prefix(80))" }
+        out += Offload.copiesInProgress().map { "  \($0.line)" }
         let procs = ProcSampler().sample()
         out += outsideQueue(procs).map { "  outside  \($0.kind.padding(toLength: 10, withPad: " ", startingAt: 0)) pid \($0.pid)  \($0.cwd.map(Views.tilde) ?? "?")  \($0.reason)" }
         for plat in ["android", "ios"] {
             let (phys, virt) = devices(plat, procs: procs)
-            out.append("\(plat): physical \(phys.isEmpty ? "none" : phys.joined(separator: ", ")); virtual \(virt.isEmpty ? "none" : virt.map { "\($0.name) \($0.id) up \(Fmt.ago($0.started).replacingOccurrences(of: " ago", with: ""))" }.joined(separator: ", "))")
+            out.append("\(plat): physical \(phys.isEmpty ? "none" : phys.joined(separator: ", ") + (plat == "ios" ? " (installs ask the user)" : "")); virtual \(virt.isEmpty ? "none" : virt.map { "\($0.name) \($0.id) up \(Fmt.ago($0.started).replacingOccurrences(of: " ago", with: ""))" }.joined(separator: ", "))")
         }
         let leases = Leases.live()
         out.append("leases: " + (leases.isEmpty ? "none" : leases.map { $0.isImplicit ? "\($0.device) in use by session \($0.session) (no lease)" : "\($0.name) (\($0.device)) to session \($0.session) until \(Leases.time($0.until))\($0.purpose.isEmpty ? "" : " for \"\($0.purpose)\"")" }.joined(separator: "; ")))
@@ -1094,6 +1092,7 @@ enum CLI {
     RigWatch status                     what is running, queued and booted
     RigWatch mcp                        MCP server: agents acquire and release emulators, simulators and phones
     RigWatch peer info|hold|run         what another Mac's RigWatch uses to borrow this Mac's devices (over SSH)
+    RigWatch peer doctor HOST           how another Mac is set up to take this Mac's builds
     RigWatch iphone list                paired iPhones here and on the allowed Macs
     RigWatch iphone install APP [--device NAME]  install an .app on a real iPhone, after the user allows it in RigWatch
     RigWatch peer install HOST [--share]  copy this RigWatch to another Mac over SSH (and turn sharing on there)

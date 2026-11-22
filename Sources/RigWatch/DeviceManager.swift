@@ -71,7 +71,6 @@ enum DeviceManager {
         var out: [String: Any] = ["devices": rows, "your_session": me]
         if platform != "ios" { out["android_avds_to_boot"] = avds().filter { a in !devs.contains { $0.kind == .emulator && $0.name == a } } }
         if platform != "android" { out["ios_simulators_to_boot"] = simulators().filter { $0.state == "Shutdown" }.prefix(12).map { "\($0.name) · \($0.runtime) · \($0.udid)" } }
-        if platform != "android" { let phones = Rules.iPhones(); if !phones.isEmpty { out["connected_iphones"] = phones } }
         return out
     }
 

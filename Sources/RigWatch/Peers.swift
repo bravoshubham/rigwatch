@@ -254,6 +254,33 @@ enum Peers {
 
     enum Status: Equatable { case online(PeerInfo), noRigWatch, unreachable(String) }
 
+    /// `peer doctor HOST`: how another Mac is set up for taking this Mac's builds, in one look.
+    static func doctor(_ host: String) -> String {
+        var out = ["\(host): address \(Sh.run("/usr/bin/ssh", ["-G", host], timeout: 5).out.split(separator: "\n").first { $0.hasPrefix("hostname ") }?.dropFirst(9) ?? "?")"
+                   + (Offload.nearby(host) ? " (Thunderbolt or local network: copies uncompressed)" : " (copies compressed)")]
+        let p = load().first { $0.host == host }
+        out.append("here: " + (p == nil ? "not listed (RigWatch peer install \(host) --share adds it)" : p!.allowed ? "allowed" : "listed, not allowed"))
+        let script = """
+            A="$HOME/Applications/RigWatch.app/Contents/MacOS/RigWatch"; B=/opt/homebrew/bin/rigwatch
+            echo "app copy: $([ -x "$A" ] && "$A" version || echo none)"
+            echo "homebrew: $([ -x "$B" ] && /opt/homebrew/bin/brew list --versions rigwatch 2>/dev/null || echo 'not installed (it runs from the app copy)')"
+            echo "xcode: $(xcodebuild -version 2>/dev/null | head -1 || echo none)"
+            echo "disk free: $(df -h "$HOME" | awk 'NR==2{print $4" of "$2}')"
+            echo "copies of other Macs' worktrees: $(ls -d "$HOME"/Library/Caches/RigWatch/remote/*/* 2>/dev/null | wc -l | tr -d ' ')"
+            R="$A"; [ -x "$R" ] || R="$B"; [ -x "$R" ] && "$R" status | head -1
+            """
+        let r = Sh.run("/usr/bin/ssh", sshOpts + [host, script], timeout: 90)
+        guard r.code == 0 else { return (out + ["could not ask it over ssh (exit \(r.code))\(r.err.isEmpty ? "" : ": " + r.err.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))"]).joined(separator: "\n") }
+        out += r.out.split(separator: "\n").map(String.init)
+        if case .online(let i) = probe(host) {
+            out.append("sharing \(i.sharing ? "on" : "off") · \(i.cores) cores · \(Int(i.memGB)) GB, \(i.memFree ?? 0)% free · busy \(String(format: "%.2f", i.busy))"
+                       + (AppCopy.ownBuild > 0 && build(i.version) < AppCopy.ownBuild ? " · older RigWatch than here (it is updated before its next build)" : ""))
+        }
+        let fails = Offload.failures().filter { $0.key.hasPrefix(host + "|") && Date().timeIntervalSince($0.value.at) < Offload.skipFor }
+        out.append(fails.isEmpty ? "no recent failed builds there" : "builds not sent there for now: " + fails.map { "\(Views.tilde(String($0.key.dropFirst(host.count + 1)))) (\($0.value.why))" }.joined(separator: "; "))
+        return out.joined(separator: "\n")
+    }
+
     static func probe(_ host: String) -> Status {
         let r = Sh.run("/usr/bin/ssh", sshOpts + [host, remote(["info"])], timeout: 12)
         if r.code == 3 || r.out.contains("RIGWATCH_NO_PEER") { return .noRigWatch }
@@ -353,11 +380,14 @@ enum Peers {
             do {
                 let i = try install(on: a[1], share: a.contains("--share"))
                 print("RigWatch \(i.version) on \(i.name), sharing \(i.sharing ? "on" : "off")")
-                guard a.contains("--share") else {
-                    print("This Mac sends it nothing until it is allowed here: RigWatch peer install \(a[1]) --share, or Allow on the Device Manager page."); return 0
-                }
-                // Sharing was asked for: this Mac may use it now. A Mac already listed under another name (an SSH alias) keeps that name.
+                // A Mac already listed under another name (an SSH alias) keeps that name.
                 let known = load().first { p in p.host == a[1] || seen()[p.host]?.info.name == i.name }
+                guard a.contains("--share") else {
+                    print(known?.allowed == true ? "Allowed here as \(known!.host)."
+                          : "This Mac sends it nothing until it is allowed here: RigWatch peer install \(a[1]) --share, or Allow on the Device Manager page.")
+                    return 0
+                }
+                // Sharing was asked for: this Mac may use it now.
                 let host = known?.host ?? a[1]
                 if known?.allowed != true { setAllowed(host, true) }
                 _ = probe(host)
@@ -366,6 +396,7 @@ enum Peers {
             }
             catch let f as DeviceManager.Failure { Rules.say(f.message); return 1 } catch { Rules.say("\(error)"); return 1 }
         case "refresh": refreshAllowed(); return 0
+        case "doctor" where a.count == 2: print(doctor(a[1])); return 0
         case "sync": return Offload.sync(Array(a.dropFirst()))
         case "exec": return Offload.exec(Array(a.dropFirst()))
         case "iphones": print(String(decoding: (try? JSONEncoder().encode(IPhones.here())) ?? Data(), as: UTF8.self)); return 0

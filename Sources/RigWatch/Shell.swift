@@ -19,7 +19,9 @@ enum Sh {
     struct Result { let code: Int32; let data: Data; let err: String
         var out: String { String(decoding: data, as: UTF8.self) } }
 
-    static func run(_ exe: String, _ args: [String], cwd: String? = nil, env extra: [String: String] = [:], timeout: Double = 15, started: ((pid_t) -> Void)? = nil) -> Result {
+    /// `lines` gets stdout line by line (lines end in \n or \r) as it comes; then only its last 64 KB is kept.
+    static func run(_ exe: String, _ args: [String], cwd: String? = nil, env extra: [String: String] = [:], timeout: Double = 15,
+                    started: ((pid_t) -> Void)? = nil, lines: ((Substring) -> Void)? = nil) -> Result {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe.hasPrefix("/") ? exe : "/usr/bin/env")
         p.arguments = exe.hasPrefix("/") ? args : [exe] + args
@@ -31,7 +33,20 @@ enum Sh {
         started?(p.processIdentifier)
         var out = Data(), err = Data()
         let g = DispatchGroup()
-        g.enter(); DispatchQueue.global(qos: .utility).async { out = o.fileHandleForReading.readDataToEndOfFile(); g.leave() }
+        g.enter(); DispatchQueue.global(qos: .utility).async {
+            if let lines {
+                var rest = ""
+                while case let d = o.fileHandleForReading.availableData, !d.isEmpty {
+                    out.append(d); if out.count > 128 << 10 { out = out.suffix(64 << 10) }
+                    rest += String(decoding: d, as: UTF8.self)
+                    var parts = rest.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r" })
+                    rest = String(parts.removeLast())
+                    parts.forEach(lines)
+                }
+                if !rest.isEmpty { lines(Substring(rest)) }
+            } else { out = o.fileHandleForReading.readDataToEndOfFile() }
+            g.leave()
+        }
         g.enter(); DispatchQueue.global(qos: .utility).async { err = e.fileHandleForReading.readDataToEndOfFile(); g.leave() }
         let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
