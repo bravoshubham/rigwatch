@@ -373,7 +373,7 @@ enum Offload {
             // Spare mode: that Mac takes builds however busy it gets (its own queue still limits them), unless its
             // memory is critical. Balanced: only a Mac clearly less busy than this one and not near busy itself.
             let fits = spare ? i.pressure < 4
-                : peersFirst ? i.pressure < 2 && (i.memFree ?? 100) >= Peers.limits.memFreeMin && i.busy < Peers.busyAt - Peers.margin
+                : peersFirst ? i.pressure < 2 && (i.memFree ?? 100) >= Peers.limits.memFreeMin && i.busy < Peers.busyAt
                 : i.pressure < 2 && (i.memFree ?? 100) >= Peers.limits.memFreeMin && i.busy < Peers.busyAt - Peers.margin && (full || i.busy <= h.busy - Peers.margin)
             guard i.sharing, fits, kind != "xcodebuild" || i.xcode,
                   skip[key(p.host, root)].map({ Date().timeIntervalSince($0.at) > skipFor }) ?? true else { return nil }
@@ -381,9 +381,27 @@ enum Offload {
         }
         let sent = Dictionary(grouping: Peers.activeRuns(), by: \.host).mapValues(\.count)
         // Peers first sends only to a Mac with room left for one more build (its own queue would only make it wait).
-        let ranked = ok.filter { !peersFirst || full || room($0.1, sent[$0.0] ?? 0) >= 1 }
+        // Peers first sends only to a Mac with some room left (its own queue limits how many run there).
+        let ranked = ok.filter { !peersFirst || full || room($0.1, sent[$0.0] ?? 0) > 0 }
             .sorted { room($0.1, sent[$0.0] ?? 0) > room($1.1, sent[$1.0] ?? 0) }
-        guard let best = ranked.first else { return nil }
+        guard let best = ranked.first else {
+            if peersFirst {
+                // Say why each Mac was passed over, so a build that stays here can be explained.
+                let why = allowed.map { p -> String in
+                    guard let s = seen[p.host], fresh(s) else { return "\(p.host) not heard from lately" }
+                    let i = s.info
+                    if !i.sharing { return "\(p.host) doesn't share" }
+                    if kind == "xcodebuild" && !i.xcode { return "\(p.host) has no Xcode" }
+                    if i.pressure >= 2 { return "\(p.host) memory pressure" }
+                    if (i.memFree ?? 100) < Peers.limits.memFreeMin { return "\(p.host) \(i.memFree ?? 0)% memory free" }
+                    if i.busy >= Peers.busyAt { return "\(p.host) busy \(String(format: "%.2f", i.busy))" }
+                    if skip[key(p.host, root)] != nil { return "\(p.host) failed this worktree lately" }
+                    return "\(p.host) no room (\(String(format: "%.1f", room(i, sent[p.host] ?? 0))) builds)"
+                }
+                Rules.log("offload: \(kind) of \(Views.tilde(root)) stays here: \(why.joined(separator: "; "))")
+            }
+            return nil
+        }
         for (host, i) in ranked where Peers.build(i.version) >= minBuild && have[key(host, root)] != nil {
             let t = took[key(host, root)].flatMap { Date().timeIntervalSince($0.at) < skipFor ? $0.seconds : nil }
             // Copying it there lately took longer than most builds: worth it only when this build would otherwise wait.
