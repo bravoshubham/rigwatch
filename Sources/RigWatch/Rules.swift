@@ -525,8 +525,11 @@ enum Rules {
         let p = pool(me)
         // When this Mac is busy or every slot is taken and another Mac is clearly less busy, the command starts at
         // once without a slot here and its builds run on that Mac (`peer exec`). Checked again while it waits.
-        let wrapped = here || s.paused || !s.offloadBuilds || a.count != 3 || a[0] != "/bin/zsh" || a[1] != "-c" ? nil : Offload.wrap(a[2])
-        let root = wrapped == nil || !Peers.load().contains(where: \.allowed) ? nil : Offload.root(a[2], cwd: me.cwd)
+        // The hook's form is `/bin/zsh -c CMD`. A session that calls `RigWatch run -- ./gradlew …` itself gives the tool
+        // and its arguments instead: the same command as one shell line, so it can go to another Mac too.
+        let shellLine = a.count == 3 && a[0] == "/bin/zsh" && a[1] == "-c" ? a[2] : Offload.shellJoin(a)
+        let wrapped = here || s.paused || !s.offloadBuilds ? nil : Offload.wrap(shellLine)
+        let root = wrapped == nil || !Peers.load().contains(where: \.allowed) ? nil : Offload.root(shellLine, cwd: me.cwd)
         var lastTry = Date()
         func elsewhere(full: Bool) -> Int32? {
             lastTry = Date()
