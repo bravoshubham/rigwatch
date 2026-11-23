@@ -163,7 +163,10 @@ enum RemoteTree {
         // 3. Each dependency set it lacks, once per lockfile.
         for d in deps where missing.contains(d.key) {
             let store = base + "/.deps/" + d.key
-            let c = rsync(["--rsync-path", "mkdir -p \(q(store)) && rsync", d.src + "/", host + ":" + store + "/" + d.kind.folder + ".part/"])
+            // React Native packages' Android build output (android/build, .cxx: often most of node_modules) never goes:
+            // Gradle rebuilds it there, and a build here rewriting it mid-copy would break the copy.
+            let c = rsync(["--exclude", "**/android/build/", "--exclude", "**/android/.cxx/", "--exclude", "**/.cxx/",
+                           "--rsync-path", "mkdir -p \(q(store)) && rsync", d.src + "/", host + ":" + store + "/" + d.kind.folder + ".part/"])
             guard c.code == 0 || c.code == 24 else { return fail("could not send \(d.folder) to \(host): \(c.err.prefix(200))") }
             r = ssh(host, "cd \"$HOME\" && cd \(q(store)) && rm -rf \(d.kind.folder) && mv \(d.kind.folder).part \(d.kind.folder) && printf %s \(q(root)) > root && touch .complete", timeout: 300)
             guard r.code == 0 else { return fail("could not store \(d.folder) on \(host): \(r.err.prefix(200))") }
