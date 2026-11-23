@@ -212,6 +212,13 @@ struct RulesView: View {
                 }.padding(.leading, 46)
                 rule("Delete orphaned DerivedData", $s.reapDerivedData,
                      "Xcode build folders untouched for a day whose project is provably gone: its folder can be read and no longer holds it. Projects on external drives or in folders macOS guards are left alone.") { EmptyView() }
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Copies other Macs send here").font(.system(size: 13, weight: .semibold))
+                    Text("Worktrees other Macs send here to build (always cleaned up, as RigWatch's own cache): one goes when unused this long, and the least recently used go while all of them take more than this. One a build runs in, or used in the last half hour, stays. A copy also goes when its worktree is removed on the Mac that sent it.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Stepper(value: $s.copyIdleHours, in: 1...168) { setting("\(s.copyIdleHours) h unused") }
+                    Stepper(value: $s.copiesMaxGB, in: 10...500, step: 10) { setting("\(s.copiesMaxGB) GB in all") }
+                }.padding(.leading, 46)
             }
         }
     }

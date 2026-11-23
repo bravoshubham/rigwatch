@@ -26,7 +26,7 @@ enum Offload {
     }
     static let root = "@@ROOT@@"
     /// RigWatch there must answer `home` and know `run --here --watch-stdin`.
-    static let minBuild = 27
+    static let minBuild = 39   // the copy there is a git worktree; that Mac cleans up mirrors and shared node_modules/Pods
 
     // MARK: which commands can move
 
@@ -441,6 +441,47 @@ enum Offload {
         return 0
     }
 
+    /// `peer trim`, run here by a Mac that sends its builds here, before each copy: the clean-up of the copies
+    /// other Macs sent (idle, over the cap), and of this Mac's copies elsewhere of worktrees gone here; at most every 10 minutes. RigWatch's own cache, so even with the Rules paused.
+    static func trim() -> Int32 {
+        let stamp = Rules.dir + "/last-copy-trim"
+        if let t = Rules.mtime(stamp), Date().timeIntervalSince(t) < 600 { return 0 }
+        let fd = open(Rules.dir + "/copy-trim.lock", O_RDWR | O_CREAT, 0o644)
+        defer { if fd >= 0 { close(fd) } }
+        guard fd >= 0, flock(fd, LOCK_EX | LOCK_NB) == 0 else { return 0 }
+        FileManager.default.createFile(atPath: stamp, contents: nil)
+        var r = ReapReport()
+        Rules.reapRemoteCopies(&r, ProcSampler().sample(), apply: true)
+        dropGone(&r, apply: true)
+        for a in r.actions { print("\(a.target): \(a.detail): \(a.result ?? "")") }
+        return 0
+    }
+
+    /// Copies on other Macs of worktrees that are gone here: removed there, with their branch in the mirror.
+    static func dropGone(_ r: inout ReapReport, apply: Bool) {
+        for (k, _) in copies() {
+            let parts = k.split(separator: "|", maxSplits: 1).map(String.init)
+            guard parts.count == 2, !FileManager.default.fileExists(atPath: parts[1]) else { continue }
+            let (host, root) = (parts[0], parts[1]), dest = copyDir(root), base = (dest as NSString).deletingLastPathComponent
+            var a = ReapAction(kind: "Remove copy", target: "\(host): \((dest as NSString).lastPathComponent)", key: k, detail: "copy of \(Views.tilde(root)), which is gone here")
+            if apply {
+                let q = Rules.quote, name = (dest as NSString).lastPathComponent
+                let res = RemoteTree.ssh(host, "cd \"$HOME\" || exit 1; rm -rf \(q(dest)) || exit 1; for m in \(q(base))/.mirrors/*.git; do [ -d \"$m\" ] || continue; "
+                    + "git --git-dir=\"$m\" update-ref -d refs/heads/\(q(name)) 2>/dev/null; git --git-dir=\"$m\" worktree prune; done; true", timeout: 300)
+                if res.code == 0 {
+                    a.outcome = "done"; a.result = "removed"
+                    let fd = open(Rules.dir + "/remote-copies.lock", O_RDWR | O_CREAT, 0o644)
+                    if fd >= 0 { flock(fd, LOCK_EX) }
+                    var all = copies(); all[k] = nil
+                    Rules.write(try? Leases.encoder.encode(all), to: copiesFile)
+                    if fd >= 0 { close(fd) }
+                } else { a.outcome = "failed"; a.result = res.code == 255 ? "\(host) not reachable; tried again later" : "exit \(res.code): \(res.err.prefix(150))" }
+                Rules.log("offload: \(a.detail) on \(host): \(a.result ?? "")")
+            }
+            r.actions.append(a)
+        }
+    }
+
     // MARK: running it there
 
     /// Where a worktree's copy lives on the other Mac, relative to its home.
@@ -451,9 +492,9 @@ enum Offload {
         return "Library/Caches/RigWatch/remote/\(me)/\(name)-\(tag)"
     }
 
-    /// Copies a worktree over (only changes after the first time). Build outputs stay where they are on each side:
-    /// they're excluded, so the copy there keeps its own and builds incrementally. Packages keep their own build
-    /// folders (npm packages ship compiled code in build/), except React Native libraries' Android build output.
+    /// Brings the copy of a worktree there up to date: by git (RemoteTree: history once per repository, then only
+    /// the changes; node_modules and Pods once per lockfile), or for a folder git can't send, the whole tree by rsync.
+    /// Build output never goes: the copy there keeps its own and builds incrementally.
     /// One copy of a worktree to a Mac runs at a time: another build of it waits (`wait`) and then sends only what
     /// changed meanwhile, or, for a background `peer sync`, leaves it to the copy already running.
     static func copy(_ root: String, to host: String, keep: [String], wait: Bool = true) -> Sh.Result {
@@ -466,26 +507,29 @@ enum Offload {
             flock(fd, LOCK_EX)
         }
         stopOrphans(host: host, dest: dest)
-        // The stamp tells that Mac's clean-up when the copy was last used (rsync keeps the folders' own times).
-        var args = [nearby(host) ? "-a" : "-az", "--delete", "--progress", "-e", (["/usr/bin/ssh"] + Peers.sshOpts).joined(separator: " "),
-                    "--rsync-path", "mkdir -p \(Rules.quote(dest)) && touch \(Rules.quote(dest))/\(usedStamp) && rsync", "--exclude", "/" + usedStamp]
-        for f in ["- node_modules/**/android/build/", "- **/node_modules/**/android/build/", "+ node_modules/**", "+ **/node_modules/**", "+ Pods/**", "+ **/Pods/**"] { args += ["--filter", f] }
-        // React Native's iOS codegen writes headers the Pods project compiles into build/generated/ios: those go too.
-        for b in ["/build/", "/ios/build/"] {
-            for f in ["+ \(b)", "+ \(b)generated/", "+ \(b)generated/ios/", "+ \(b)generated/ios/**", "- \(b)**"] { args += ["--filter", f] }
-        }
-        for x in ["build/", ".gradle/", "DerivedData/", ".rigwatch-dd/", ".rigwatch-out/", ".cxx/", ".kotlin/", ".externalNativeBuild/"] { args += ["--exclude", x] }
-        if nearby(host) { args.append("--whole-file") }
-        for k in Set(keep + derivedDirs(root)) { args += ["--exclude", "/" + k + "/"] }
         let t0 = Date(), limit = 3600.0
         var prog = CopyProgress(host: host, root: root, pid: getpid(), pidStart: ProcSampler.startTime(getpid()) ?? 0, since: t0)
         var wrote = Date.distantPast
-        var r = Sh.run("/usr/bin/rsync", args + [root + "/", host + ":" + dest + "/"], timeout: limit, started: { copyPid = $0 }) { line in
-            // openrsync: "   3000000 100%  363.54MB/s   00:00:00 (xfer#1, to-check=1/4)" once a file is sent.
-            guard line.contains("to-check="), let m = progressLine.firstMatch(in: String(line), range: NSRange(line.startIndex..., in: line)) else { return }
-            let s = String(line), n = { (i: Int) in Range(m.range(at: i), in: s).flatMap { Int64(s[$0]) } ?? 0 }
-            prog.bytes += n(1); prog.files = Int(n(2)); prog.total = Int(n(3))
-            if Date().timeIntervalSince(wrote) > 3 { wrote = Date(); noteProgress(prog) }
+        // An rsync to that Mac with progress for `status`: no compression or diffing over a Thunderbolt bridge or LAN.
+        func rsync(_ extra: [String]) -> Sh.Result {
+            let args = [nearby(host) ? "-a" : "-az", "--progress", "-e", RemoteTree.sshCommand] + (nearby(host) ? ["--whole-file"] : []) + extra
+            let r = Sh.run("/usr/bin/rsync", args, timeout: max(60, limit - Date().timeIntervalSince(t0)), started: { copyPid = $0 }) { line in
+                // openrsync: "   3000000 100%  363.54MB/s   00:00:00 (xfer#1, to-check=1/4)" once a file is sent.
+                guard line.contains("to-check="), let m = progressLine.firstMatch(in: String(line), range: NSRange(line.startIndex..., in: line)) else { return }
+                let s = String(line), n = { (i: Int) in Range(m.range(at: i), in: s).flatMap { Int64(s[$0]) } ?? 0 }
+                prog.bytes += n(1); prog.files = Int(n(2)); prog.total = Int(n(3))
+                if Date().timeIntervalSince(wrote) > 3 { wrote = Date(); noteProgress(prog) }
+            }
+            copyPid = 0
+            return r
+        }
+        noteProgress(prog)
+        var r: Sh.Result
+        if let why = RemoteTree.unsupported(root) {
+            Rules.log("offload: copying all of \(Views.tilde(root)) to \(host): \(why)")
+            r = rsync(wholeTreeArgs(root, dest: dest, keep: keep) + [root + "/", host + ":" + dest + "/"])
+        } else {
+            r = RemoteTree.send(root, to: host, dest: dest, keep: keep, rsync: rsync)
         }
         copyPid = 0
         noteProgress(nil, removing: prog.id)
@@ -500,6 +544,21 @@ enum Offload {
             r = Sh.Result(code: r.code, data: r.data, err: "\(why) (after \(Int(took)) s)")
         }
         return r
+    }
+
+    /// The old way, for a folder git can't send (no git, submodules, LFS): the whole tree with rsync, without build
+    /// output (excluded by name and by what Xcode keeps in DerivedData) or files over 100 MB.
+    static func wholeTreeArgs(_ root: String, dest: String, keep: [String]) -> [String] {
+        var args = ["--delete", "--max-size=100m", "--rsync-path", "mkdir -p \(Rules.quote(dest)) && touch \(Rules.quote(dest))/\(usedStamp) && rsync", "--exclude", "/" + usedStamp]
+        for f in ["- node_modules/**/android/build/", "- **/node_modules/**/android/build/", "+ node_modules/**", "+ **/node_modules/**", "+ Pods/**", "+ **/Pods/**"] { args += ["--filter", f] }
+        // React Native's iOS codegen writes headers the Pods project compiles into build/generated/ios: those go too.
+        for b in ["/build/", "/ios/build/"] {
+            for f in ["+ \(b)", "+ \(b)generated/", "+ \(b)generated/ios/", "+ \(b)generated/ios/**", "- \(b)**"] { args += ["--filter", f] }
+        }
+        for x in RemoteTree.outputDirs { args += ["--exclude", x + "/"] }
+        for x in RemoteTree.outputSuffixes { args += ["--exclude", "*" + x] }
+        for k in Set(keep + derivedDirs(root)) { args += ["--exclude", "/" + k + "/"] }
+        return args
     }
 
     /// Xcode DerivedData folders inside a worktree (a `-derivedDataPath` such as `.dd`), whatever their name and
@@ -553,7 +612,7 @@ enum Offload {
             + "b=$(sed -n 's/^export NODE_BINARY=//p' \"$f\"); [ -n \"$n\" ] && [ -n \"$b\" ] && [ ! -x \"$b\" ] && sed -i '' \"s#^export NODE_BINARY=.*#export NODE_BINARY=$n#\" \"$f\"; done; "
         for d in derivedDirs(root) { sh += "[ -f \(Rules.quote(d))/info.plist ] && LC_ALL=C grep -qF \(Rules.quote(root)) \(Rules.quote(d))/info.plist && rm -rf \(Rules.quote(d)); " }
         sh += "true"
-        let r = Sh.run("/usr/bin/ssh", Peers.sshOpts + [host, sh], timeout: 300)
+        let r = Sh.run("/usr/bin/ssh", RemoteTree.sshOpts + [host, sh], timeout: 300)
         if r.code != 0 { Rules.log("offload: could not point the copy of \(Views.tilde(root)) on \(host) at itself (exit \(r.code)): \(r.err.prefix(200))") }
     }
 

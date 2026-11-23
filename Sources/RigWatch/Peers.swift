@@ -398,6 +398,12 @@ enum Peers {
         case "refresh": refreshAllowed(); return 0
         case "doctor" where a.count == 2: print(doctor(a[1])); return 0
         case "sync": return Offload.sync(Array(a.dropFirst()))
+        case "trim": return Offload.trim()
+        case "send" where a.count == 3:   // copy a worktree there now, whether or not that Mac takes builds
+            let t0 = Date(), r = Offload.copy(a[2], to: a[1], keep: [])
+            if r.code == 0 { Offload.noteCopy(a[1], a[2]); print("sent \(Views.tilde(a[2])) to \(a[1]) in \(Int(Date().timeIntervalSince(t0))) s: ~/\(Offload.copyDir(a[2]))") }
+            else { Rules.say("could not send it: \(r.err)") }
+            return r.code == 0 ? 0 : 1
         case "exec": return Offload.exec(Array(a.dropFirst()))
         case "iphones": print(String(decoding: (try? JSONEncoder().encode(IPhones.here())) ?? Data(), as: UTF8.self)); return 0
         case "iphone-install" where a.count == 3:   // the asking Mac got the user's yes before sending it

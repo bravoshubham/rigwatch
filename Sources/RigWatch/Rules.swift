@@ -31,6 +31,8 @@ struct RuleSettings: Codable, Equatable {
     var reapWorktrees = true
     var worktreeIdleHours = 24
     var reapDerivedData = true
+    var copyIdleHours = 24       // copies other Macs sent here to build go when unused this long
+    var copiesMaxGB = 60         // and the least recently used go while all of them take more than this
     /// Folders the clean-up never touches: no worktree, build output or DerivedData of a project in them.
     var neverClean: [String] = []
 
@@ -790,6 +792,7 @@ enum Rules {
         // Copies other Macs sent here to build: their own cache, so this runs even when only devices are looked after.
         if explicit || !apply || (mtime(copyStamp).map { Date().timeIntervalSince($0) > 3600 } ?? true) {
             reapRemoteCopies(&r, procs, apply: apply)
+            Offload.dropGone(&r, apply: apply)
             if apply { FileManager.default.createFile(atPath: copyStamp, contents: nil) }
         }
         if devicesOnly { return r }
@@ -851,30 +854,91 @@ enum Rules {
         }
     }
 
-    /// Worktree copies other Macs sent here (`peer exec`) that no build has used for 3 days, or for 1 day when
-    /// the disk has less than 40 GB free. Another build of one just copies it again.
+    /// Worktree copies other Macs sent here to build (`peer exec`): one goes when no build has used it for the Rules'
+    /// hours (24), and the least recently used go while all of them take more than the Rules' cap (60 GB; 30 GB
+    /// with under 40 GB free). Their git mirrors and node_modules/Pods sets go once no copy uses them. A copy a
+    /// build runs in, or used in the last half hour, stays. Another build of a removed copy just sends it again.
     static func reapRemoteCopies(_ r: inout ReapReport, _ procs: [Proc], apply: Bool) {
-        let fm = FileManager.default, base = NSHomeDirectory() + "/Library/Caches/RigWatch/remote", now = Date()
+        let fm = FileManager.default, base = NSHomeDirectory() + "/Library/Caches/RigWatch/remote", now = Date(), s = RuleSettings.load()
         guard let senders = try? fm.contentsOfDirectory(atPath: base) else { return }
         let free = ((try? fm.attributesOfFileSystem(forPath: NSHomeDirectory()))?[.systemFreeSize] as? NSNumber)?.int64Value ?? .max
-        let limit: TimeInterval = free < 40 << 30 ? 86400 : 3 * 86400
+        let cap = Int64(free < 40 << 30 ? min(30, s.copiesMaxGB) : s.copiesMaxGB) << 30, idle = TimeInterval(max(1, s.copyIdleHours) * 3600)
         let me = getuid(), cwds = procs.filter { $0.uid == me }.compactMap { ProcSampler.cwd($0.pid) }
-        for from in senders {
+        func kb(_ path: String, _ ignore: [String] = []) -> Int64 {
+            (Int64(Sh.run("/usr/bin/du", ["-sk"] + ignore.flatMap { ["-I", $0] } + [path], timeout: 600).out.split(separator: "\t").first ?? "0") ?? 0) << 10
+        }
+        struct Copy { let from: String, name: String, path: String, used: Date, busy: Bool; var size: Int64 = 0 }
+        var copies: [Copy] = [], shared: [(path: String, size: Int64, used: Date)] = []
+        for from in senders where !from.hasPrefix(".") {
             for name in (try? fm.contentsOfDirectory(atPath: base + "/" + from)) ?? [] {
                 let d = base + "/" + from + "/" + name
+                if name.hasPrefix(".") {
+                    for e in (try? fm.contentsOfDirectory(atPath: d)) ?? [] where !e.hasPrefix(".") { shared.append((d + "/" + e, 0, mtime(d + "/" + e) ?? .distantPast)) }
+                    continue
+                }
                 // Copies from before the stamp: rsync sets folders to the sender's times, so build output (never copied) says more.
                 let used = ([Offload.usedStamp, "", "build", "app/build", "android/app/build", ".gradle", ".rigwatch-dd"]
                     .compactMap { mtime($0.isEmpty ? d : d + "/" + $0) }).max() ?? .distantPast
-                guard now.timeIntervalSince(used) > limit else { continue }
-                if cwds.contains(where: { $0 == d || $0.hasPrefix(d + "/") }) { r.kept.append("\(from)/\(name): a build is running in it"); continue }
-                var a = ReapAction(kind: "Remove copy", target: "\(from)/\(name)", key: d, detail: "worktree copy from \(from), last used \(Fmt.ago(used))")
-                if apply {
-                    do { try fm.removeItem(atPath: d); a.outcome = "done"; a.result = "removed" }
-                    catch { a.outcome = "failed"; a.result = "\(error.localizedDescription)" }
-                    log("removed worktree copy \(from)/\(name) (last used \(Fmt.ago(used))): \(a.result ?? "")")
-                }
-                r.actions.append(a)
+                copies.append(Copy(from: from, name: name, path: d, used: used, busy: cwds.contains { $0 == d || $0.hasPrefix(d + "/") }))
             }
+        }
+        func remove(_ c: Copy, _ why: String) {
+            var a = ReapAction(kind: "Remove copy", target: "\(c.from)/\(c.name)", key: c.path, detail: "worktree copy from \(c.from), \(why)")
+            if apply {
+                do { try fm.removeItem(atPath: c.path); a.outcome = "done"; a.result = "removed" }
+                catch { a.outcome = "failed"; a.result = "\(error.localizedDescription)" }
+                // Its branch in the repository's mirror goes too, so git can let go of what only it needed.
+                for m in (try? fm.contentsOfDirectory(atPath: base + "/" + c.from + "/.mirrors")) ?? [] {
+                    let g = base + "/" + c.from + "/.mirrors/" + m
+                    _ = Sh.run("/usr/bin/git", ["--git-dir=" + g, "update-ref", "-d", "refs/heads/" + c.name], timeout: 30)
+                    _ = Sh.run("/usr/bin/git", ["--git-dir=" + g, "worktree", "prune"], timeout: 30)
+                }
+                log("removed worktree copy \(c.from)/\(c.name) (\(why)): \(a.result ?? "")")
+            }
+            r.actions.append(a)
+        }
+        var live: [Copy] = []
+        for c in copies {
+            if now.timeIntervalSince(c.used) > idle {
+                if c.busy { r.kept.append("\(c.from)/\(c.name): a build is running in it"); live.append(c); continue }
+                remove(c, "last used \(Fmt.ago(c.used))")
+            } else { live.append(c) }
+        }
+        // The cap: node_modules and Pods in a copy are clones of the shared sets, counted once there.
+        for i in live.indices { live[i].size = kb(live[i].path, ["node_modules", "Pods"]) }
+        for i in shared.indices { shared[i].size = kb(shared[i].path) }
+        var total = live.reduce(0) { $0 + $1.size } + shared.reduce(0) { $0 + $1.size }
+        for c in live.sorted(by: { $0.used < $1.used }) where total > cap {
+            guard !c.busy, now.timeIntervalSince(c.used) > 1800 else { continue }
+            remove(c, "all copies took \(Fmt.bytes(UInt64(total))), over \(Fmt.bytes(UInt64(cap))); last used \(Fmt.ago(c.used))")
+            total -= c.size
+            live.removeAll { $0.path == c.path }
+        }
+        // Shared sets no remaining copy uses: a node_modules or Pods set no copy has a clone of, a mirror with no worktrees.
+        var keys = Set<String>()
+        for c in live {
+            for sub in [""] + ((try? fm.contentsOfDirectory(atPath: c.path)) ?? []).filter({ !$0.hasPrefix(".") }) {
+                for f in ["node_modules", "Pods"] {
+                    if let k = fm.contents(atPath: c.path + "/" + (sub.isEmpty ? "" : sub + "/") + f + "/.rigwatch-key") { keys.insert(String(decoding: k, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)) }
+                }
+            }
+        }
+        for e in shared where now.timeIntervalSince(e.used) > 7200 {
+            let name = (e.path as NSString).lastPathComponent, isMirror = e.path.hasSuffix(".git")
+            if isMirror {
+                _ = Sh.run("/usr/bin/git", ["--git-dir=" + e.path, "worktree", "prune"], timeout: 30)
+                if !((try? fm.contentsOfDirectory(atPath: e.path + "/worktrees")) ?? []).isEmpty {
+                    if apply { _ = Sh.run("/usr/bin/git", ["--git-dir=" + e.path, "gc", "--auto", "--quiet"], timeout: 1800) }
+                    continue
+                }
+            } else if keys.contains(name) { continue }
+            var a = ReapAction(kind: "Remove copy", target: name, key: e.path, detail: (isMirror ? "git mirror" : "dependency set") + " no copy uses (\(Fmt.bytes(UInt64(e.size))))")
+            if apply {
+                do { try fm.removeItem(atPath: e.path); a.outcome = "done"; a.result = "removed" }
+                catch { a.outcome = "failed"; a.result = "\(error.localizedDescription)" }
+                log("removed \(a.detail) \(name): \(a.result ?? "")")
+            }
+            r.actions.append(a)
         }
     }
 
@@ -1158,6 +1222,8 @@ enum CLI {
     RigWatch mcp                        MCP server: agents acquire and release emulators, simulators and phones
     RigWatch peer info|hold|run         what another Mac's RigWatch uses to borrow this Mac's devices (over SSH)
     RigWatch peer doctor HOST           how another Mac is set up to take this Mac's builds
+    RigWatch peer send HOST PATH        bring the copy of a worktree on another Mac up to date now (by git)
+    RigWatch peer trim                  clean up copies other Macs sent here (idle 24 h, over 60 GB) and copies elsewhere of worktrees gone here
     RigWatch integrator claim|release [PATH] | list   one builder per repository: its builds go first, others are pointed at it
     RigWatch iphone list                paired iPhones here and on the allowed Macs
     RigWatch iphone install APP [--device NAME]  install an .app on a real iPhone, after the user allows it in RigWatch

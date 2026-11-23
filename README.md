@@ -110,8 +110,12 @@ at once, desktop app and terminal alike:
 - **Use other Macs.** RigWatch on another Mac can lend this one its devices, to spread the load: an
   Android emulator there is reached through an SSH tunnel and shows up here as an ordinary adb device
   (`acquire_device` picks it when nothing is free here, or with `where: "remote"`), and an iOS build
-  or test runs there on its own simulator with the MCP tool `run_on_mac`, which copies the worktree
-  over (only changes after the first time) and brings result files back. A Mac is used only when it
+  or test runs there on its own simulator with the MCP tool `run_on_mac`, and a queued build goes to a
+  less busy Mac. The worktree goes by git: its history once per repository into a mirror there, then a
+  snapshot of HEAD plus uncommitted changes; node_modules and Pods once per lockfile, cloned into each
+  copy; build output (DerivedData, build folders, archives) and files over 100 MB never. A copy there
+  goes when its worktree is removed here, when unused for 24 hours, or, least recently used first, while
+  all copies take more than 60 GB (both on the Rules page settings). Result files come back. A Mac is used only when it
   is allowed here and shares its devices there, both on the Device Manager page, which lists the
   Macs found in `~/.ssh/config` and on Tailscale with their load and devices. Leases end with the
   session that took them, and an emulator booted there is shut down again.
