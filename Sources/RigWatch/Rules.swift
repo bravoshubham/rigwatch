@@ -16,7 +16,7 @@ struct RuleSettings: Codable, Equatable {
     var shareDevices = false     // other Macs' agents may use this Mac's emulators (they must also be allowed there)
     var preferPeers = true       // a new emulator starts on an allowed Mac that shares, before one boots here
     var offloadBuilds = true     // a queued build runs on an allowed Mac that shares when this one is busy or full
-    var offloadMode = "balanced" // balanced: only to a clearly less busy Mac; spare: to any Mac that can take it, however busy
+    var offloadMode = "balanced" // balanced: only to a clearly less busy Mac; spare: to any Mac that can take it, however busy; peers: always to a Mac with room first
     var busyAt = 0.85            // overloaded from this CPU use (share of all cores, or 1-minute load per core)
     var memFreeMin = 15          // overloaded below this much free memory (%)
     var maxLoadPerCore = 4.0     // above this 1-minute load per core a queued build waits, unless none of its pool runs

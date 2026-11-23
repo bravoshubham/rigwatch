@@ -352,7 +352,10 @@ enum Offload {
     static func pick(kind: String, root: String, full: Bool) -> (host: String, info: PeerInfo)? {
         preparing = nil
         let h = Peers.here(), spare = Peers.limits.offloadMode == "spare"
-        guard full || Peers.hereIsBusy(h) else { return nil }
+        // Peers first: every build goes to a peer with room, however idle this Mac is, so this Mac keeps its CPU for
+        // the sessions and devices; it builds here only when no peer can take it.
+        let peersFirst = Peers.limits.offloadMode == "peers"
+        guard full || peersFirst || Peers.hereIsBusy(h) else { return nil }
         let allowed = Peers.load().filter(\.allowed)
         guard !allowed.isEmpty else { return nil }
         var seen = Peers.seen()
@@ -370,13 +373,16 @@ enum Offload {
             // Spare mode: that Mac takes builds however busy it gets (its own queue still limits them), unless its
             // memory is critical. Balanced: only a Mac clearly less busy than this one and not near busy itself.
             let fits = spare ? i.pressure < 4
+                : peersFirst ? i.pressure < 2 && (i.memFree ?? 100) >= Peers.limits.memFreeMin && i.busy < Peers.busyAt - Peers.margin
                 : i.pressure < 2 && (i.memFree ?? 100) >= Peers.limits.memFreeMin && i.busy < Peers.busyAt - Peers.margin && (full || i.busy <= h.busy - Peers.margin)
             guard i.sharing, fits, kind != "xcodebuild" || i.xcode,
                   skip[key(p.host, root)].map({ Date().timeIntervalSince($0.at) > skipFor }) ?? true else { return nil }
             return (p.host, i)
         }
         let sent = Dictionary(grouping: Peers.activeRuns(), by: \.host).mapValues(\.count)
-        let ranked = ok.sorted { room($0.1, sent[$0.0] ?? 0) > room($1.1, sent[$1.0] ?? 0) }
+        // Peers first sends only to a Mac with room left for one more build (its own queue would only make it wait).
+        let ranked = ok.filter { !peersFirst || full || room($0.1, sent[$0.0] ?? 0) >= 1 }
+            .sorted { room($0.1, sent[$0.0] ?? 0) > room($1.1, sent[$1.0] ?? 0) }
         guard let best = ranked.first else { return nil }
         for (host, i) in ranked where Peers.build(i.version) >= minBuild && have[key(host, root)] != nil {
             let t = took[key(host, root)].flatMap { Date().timeIntervalSince($0.at) < skipFor ? $0.seconds : nil }

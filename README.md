@@ -111,7 +111,7 @@ at once, desktop app and terminal alike:
   Android emulator there is reached through an SSH tunnel and shows up here as an ordinary adb device
   (`acquire_device` picks it when nothing is free here, or with `where: "remote"`), and an iOS build
   or test runs there on its own simulator with the MCP tool `run_on_mac`, and a queued build goes to a
-  less busy Mac. The worktree goes by git: its history once per repository into a mirror there, then a
+  less busy Mac (or, with "other Macs first" on the Rules page, to any Mac with room, even when this one is idle). The worktree goes by git: its history once per repository into a mirror there, then a
   snapshot of HEAD plus uncommitted changes; node_modules and Pods once per lockfile, cloned into each
   copy; build output (DerivedData, build folders, archives) and files over 100 MB never. A copy there
   goes when its worktree is removed here, when unused for 24 hours, or, least recently used first, while
