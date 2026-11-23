@@ -117,7 +117,15 @@ enum RemoteTree {
 
     /// ssh options for a copy's steps: one connection for all of them (the setup, the push, the rsyncs), which
     /// stays two minutes for the next build, instead of a handshake each.
-    static let sshOpts = Peers.sshOpts + ["-o", "ControlMaster=auto", "-o", "ControlPath=~/.ssh/rigwatch-%C", "-o", "ControlPersist=120"]
+    /// The socket lives in a short folder of this user's own: a socket path may not be longer than 104 bytes, and
+    /// one under a long home folder name (or ~/.ssh) is. Without that folder, each step connects on its own.
+    static let sshOpts: [String] = {
+        let dir = "/tmp/rigwatch-\(getuid())"
+        mkdir(dir, 0o700)
+        var st = stat()
+        guard lstat(dir, &st) == 0, st.st_uid == getuid(), (st.st_mode & S_IFMT) == S_IFDIR, st.st_mode & 0o077 == 0 else { return Peers.sshOpts }
+        return Peers.sshOpts + ["-o", "ControlMaster=auto", "-o", "ControlPath=\(dir)/%C", "-o", "ControlPersist=120"]
+    }()
     static var sshCommand: String { (["/usr/bin/ssh"] + sshOpts).joined(separator: " ") }
 
     static func ssh(_ host: String, _ script: String, timeout: Double) -> Sh.Result {

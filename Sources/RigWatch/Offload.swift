@@ -23,6 +23,7 @@ enum Offload {
         var back: [(from: String, to: String)] = []   // relative to the copy there -> absolute here
         var keep: [String] = []           // relative paths there the copy must leave alone
         var derived: String?              // the DerivedData here that .rigwatch-dd there stands for
+        var signs = false                 // builds for a real device: only on a Mac that can sign for this Mac's team
     }
     static let root = "@@ROOT@@"
     /// RigWatch there must answer `home` and know `run --here --watch-stdin`.
@@ -39,7 +40,9 @@ enum Offload {
     static let gradleInstall = rx(#"(?:^|[\s:])(?:un)?install[A-Z]\w*"#)
     static let gradleDevice = rx(#"(?:^|[\s:])connected\w*"#)
     static let serialAssign = rx(#"(?:^|\s)ANDROID_SERIAL=\S+\s*"#)
-    static let xcRefuse = rx(#"(?:^|\s)(?:archive|install|installsrc|docbuild)(?=\s|$)|-exportArchive|-exportLocalizations|-importLocalizations|-allowProvisioningUpdates|-sdk\s+["']?(?:iphoneos|watchos|appletvos|xros)\b"#)
+    static let xcRefuse = rx(#"(?:^|\s)(?:archive|install|installsrc|docbuild)(?=\s|$)|-exportArchive|-exportLocalizations|-importLocalizations|-sdk\s+["']?(?:watchos|appletvos|xros)\b"#)
+    /// A build for a real iPhone: it goes to a Mac that can sign for this Mac's team, and its app comes back here.
+    static let deviceBuild = rx(#"-allowProvisioningUpdates|-sdk\s+["']?iphoneos\b"#)
     static let xcTest = rx(#"(?:^|\s)(?:test|test-without-building)(?=\s|$)"#)
     static let destination = rx(#"-destination\s+("[^"]*"|'[^']*'|\S+)"#)
     static let projectArg = rx(#"-(workspace|project)\s+("[^"]*"|'[^']*'|[^\s;&|]+)"#)
@@ -146,13 +149,20 @@ enum Offload {
             }
             sh.gradleResults = true
         } else {
-            if Rules.has(xcRefuse, cmd) { why = "archives, installs or builds for a real device (signing stays here)"; return nil }
+            if Rules.has(xcRefuse, cmd) { why = "archives or installs (those stay here)"; return nil }
             let dests = Rules.matches(destination, cmd, group: 1)
             guard dests.count <= 1 else { why = "more than one destination"; return nil }
             let test = Rules.has(xcTest, cmd)
+            sh.signs = Rules.has(deviceBuild, cmd)
             if let d = dests.first.map(unquote) {
                 let sim = d.contains("Simulator"), mac = d.contains("platform=macOS") || d.contains("platform=OS X")
-                guard sim || mac else { why = "builds for a real device (signing stays here)"; return nil }
+                if !sim && !mac {
+                    guard d.contains("platform=iOS") else { why = "a destination other Macs can't build for"; return nil }
+                    guard !test else { why = "tests on a real iPhone (it is connected here)"; return nil }
+                    // The iPhone is connected here: there it builds for any iPhone, which installs on this one.
+                    sh.signs = true
+                    sh.cmd = sh.cmd.replacingOccurrences(of: dests[0], with: Rules.quote("generic/platform=iOS"))
+                }
                 var name = d.range(of: #"name=([^,]+)"#, options: .regularExpression).map { String(d[$0].dropFirst(5)) }
                 if let id = d.range(of: #"id=[0-9A-Fa-f-]{36}"#, options: .regularExpression).map({ String(d[$0].dropFirst(3)) }) { name = name ?? simName(id) }
                 if sim && test {
@@ -162,7 +172,7 @@ enum Offload {
                     guard let name else { why = "names a simulator this Mac can't find"; return nil }
                     sh.cmd = sh.cmd.replacingOccurrences(of: dests[0], with: Rules.quote("platform=iOS Simulator,name=\(name)"))
                 }
-            } else if !Rules.has(simSDK, cmd) { why = "no simulator or macOS destination (would build for a device)"; return nil }
+            } else if !Rules.has(simSDK, cmd) && !sh.signs { why = "no simulator or macOS destination (would build for a device)"; return nil }
             else if test { why = "tests without a destination"; return nil }
             // Products and test results come back to the DerivedData this command would have used here.
             let ddGiven = Rules.matches(DepCache.derivedArg, cmd, group: 0).first
@@ -279,6 +289,13 @@ enum Offload {
         var why = ""
         guard let sh = shape(["/bin/zsh", "-c", line], kind: kind, cwd: cwd, why: &why) else { return here(why) }
         if sh.emulator, info.avds.isEmpty, !info.emulators.contains(where: \.free) { return here("\(info.name) has no Android emulator") }
+        if sh.signs {
+            let mine = Set(Peers.signingTeams())
+            guard !mine.isEmpty else { return here("it builds for a real iPhone and this Mac has no signing certificate to go by") }
+            guard let theirs = info.signing, !mine.isDisjoint(with: theirs) else {
+                return here("it builds for a real iPhone and \(info.name) can't sign for this Mac's team (sign in to Xcode there, Settings > Accounts, with the same team)")
+            }
+        }
         if sh.kind == "xcodebuild", !info.xcode { return here("\(info.name) has no Xcode") }
         if let f = failures()[key(host, sh.root)], Date().timeIntervalSince(f.at) < skipFor { return here("\(info.name) couldn't build it lately (\(f.why))") }
         var sources: [DispatchSourceSignal] = []
@@ -685,7 +702,7 @@ enum Offload {
         #"No matching toolchains"#, #"Cannot find a Java installation"#, #"JAVA_HOME is (?:not set|set to an invalid)"#, #"Unsupported class file major version"#,
         #"Could not determine java version"#, #"NDK (?:is not installed|not configured)"#, #"Gradle could not start"#, #"command not found"#,
         #"not a git repository"#, #"xcode-select: error"#, #"Unable to find a (?:destination|device)"#, #"requires a provisioning profile"#,
-        #"No signing certificate"#, #"unable to find utility"#, #"agreed to the Xcode license"#, #"Could not resolve package dependencies"#,
+        #"No signing certificate"#, #"No Accounts?\b"#, #"No profiles for"#, #"No Account for Team"#, #"errSecInternalComponent"#, #"unable to find utility"#, #"agreed to the Xcode license"#, #"Could not resolve package dependencies"#,
         #"Failed to clone repository"#, #"SDK "[^"]*" cannot be located"#, #"There is no SDK"#, #"is not installed\. To use with Xcode"#,
         #"exit value 127\b"#, #"problem occurred evaluating settings"#, #"Unable to locate a Java Runtime"#, #"Cannot run program"#, #"node: not found"#, #"No such file or directory: node"#, #"Authorization is required to install"#, #"requires Xcode"#, #"No such module"#, #"Connection refused"#, #"Connect to (?:127\.0\.0\.1|localhost)"#,
         #"RigWatch on [^:]+: (?:no folder|no simulator|no emulator|this Mac doesn't share|.* doesn't share)"#, #"RIGWATCH_NO_PEER"#,

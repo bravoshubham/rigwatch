@@ -29,6 +29,7 @@ struct PeerInfo: Codable, Equatable {
     var home: String?              // its home folder (where copies of other Macs' worktrees live), from RigWatch 1.11
     var cpuNow: Double?            // share of all cores in use when asked, from RigWatch 1.11
     var memFree: Int?              // free memory %, from RigWatch 1.11
+    var signing: [String]?         // the teams it can sign for (see signingTeams), from RigWatch 1.11.13
     var busy: Double { Peers.busy(cpu: max(cpuNow ?? 0, load / Double(max(1, cores))), gpu: gpu ?? 0, memFree: memFree ?? 100, pressure: pressure) }
 }
 struct PeerDevice: Codable, Equatable { var id: String, name: String, free: Bool }
@@ -435,6 +436,35 @@ enum Peers {
         }
     }
 
+    /// The teams this Mac can sign for: the team (the certificate's OU) of each valid code-signing identity in its
+    /// keychains. Each Mac usually has a certificate of its own, so a device build needs the same team, not the
+    /// same certificate. Kept for 10 minutes.
+    static func signingTeams() -> [String] {
+        let cache = Rules.dir + "/signing-teams.json"
+        if let t = Rules.mtime(cache), Date().timeIntervalSince(t) < 600,
+           let d = FileManager.default.contents(atPath: cache), let v = try? JSONDecoder().decode([String].self, from: d) { return v }
+        let valid = Set(Sh.run("/usr/bin/security", ["find-identity", "-v", "-p", "codesigning"], timeout: 15).out.split(separator: "\n")
+            .compactMap { l in l.range(of: #"\b[0-9A-F]{40}\b"#, options: .regularExpression).map { String(l[$0]) } })
+        var teams = Set<String>(), hash = "", pem: [Substring] = [], inPem = false
+        let tmp = Rules.dir + "/signing-\(getpid()).pem"
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+        for l in Sh.run("/usr/bin/security", ["find-certificate", "-a", "-Z", "-p"], timeout: 30).out.split(separator: "\n") {
+            if l.hasPrefix("SHA-1 hash: ") { hash = String(l.dropFirst(12)).trimmingCharacters(in: .whitespaces); continue }
+            if l.hasPrefix("-----BEGIN CERTIFICATE") { inPem = true; pem = [] }
+            if inPem { pem.append(l) }
+            if l.hasPrefix("-----END CERTIFICATE") {
+                inPem = false
+                guard valid.contains(hash) else { continue }
+                FileManager.default.createFile(atPath: tmp, contents: Data(pem.joined(separator: "\n").utf8))
+                let subj = Sh.run("/usr/bin/openssl", ["x509", "-noout", "-subject", "-in", tmp], timeout: 10).out
+                if let r = subj.range(of: #"OU ?= ?[A-Z0-9]{10}\b"#, options: .regularExpression) { teams.insert(String(subj[r].suffix(10))) }
+            }
+        }
+        let out = teams.sorted()
+        Rules.write(try? JSONEncoder().encode(out), to: cache)
+        return out
+    }
+
     static func info() -> PeerInfo {
         let s = RuleSettings.load(), devs = DeviceManager.running(), leases = Leases.live()
         if s.shareDevices { Rules.shareAgent(true) }   // a Mac that shared before 1.11.1 gets its device clean-up on the next look
@@ -443,7 +473,7 @@ enum Peers {
         return PeerInfo(name: localName, version: AppCopy.ownVersion, sharing: s.shareDevices, cores: ProcessInfo.processInfo.activeProcessorCount,
                         memGB: Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824, pressure: Rules.pressure(), load: l[0],
                         emulators: devs.filter { $0.kind == .emulator }.map(row), simulators: devs.filter { $0.kind == .simulator }.map(row),
-                        avds: DeviceManager.avds(), xcode: FileManager.default.fileExists(atPath: "/Applications/Xcode.app"), gpu: gpuNow(), home: Sh.home, cpuNow: cpuNow(), memFree: memFreeNow())
+                        avds: DeviceManager.avds(), xcode: FileManager.default.fileExists(atPath: "/Applications/Xcode.app"), gpu: gpuNow(), home: Sh.home, cpuNow: cpuNow(), memFree: memFreeNow(), signing: signingTeams())
     }
 
     /// Leases an emulator here for an agent on another Mac and keeps it until that Mac hangs up (stdin closes).
