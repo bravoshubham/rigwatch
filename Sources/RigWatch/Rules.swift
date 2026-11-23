@@ -1223,6 +1223,7 @@ enum CLI {
     RigWatch answer ID yes|no [REASON]  answer RigWatch's question whether a device you use can be shut down
     RigWatch status                     what is running, queued and booted
     RigWatch mcp                        MCP server: agents acquire and release emulators, simulators and phones
+    RigWatch mcp-lazy [--idle S] -- CMD  run an MCP server only while it is used (put it in front of a server's command)
     RigWatch peer info|hold|run         what another Mac's RigWatch uses to borrow this Mac's devices (over SSH)
     RigWatch peer doctor HOST           how another Mac is set up to take this Mac's builds
     RigWatch peer send HOST PATH        bring the copy of a worktree on another Mac up to date now (by git)
@@ -1234,7 +1235,7 @@ enum CLI {
     RigWatch version                    the version of this RigWatch
     RigWatch install|uninstall          turn the rules on or off (Claude Code hook, MCP device manager, clean-up agent)
     """
-    static let commands: Set = ["run", "progress", "hook", "mcp", "peer", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version", "iphone", "integrator"]
+    static let commands: Set = ["run", "progress", "hook", "mcp", "peer", "reap", "status", "wt", "pin", "unpin", "answer", "install", "uninstall", "help", "version", "--version", "iphone", "integrator", "mcp-lazy"]
 
     static func main(_ args: [String]) -> Int32? {
         guard let c = args.first, commands.contains(c) else { return nil }
@@ -1243,6 +1244,7 @@ enum CLI {
         case "run": return Rules.run(a)
         case "hook": Rules.hook()   // nothing printed = the tool call goes ahead unchanged
         case "mcp": return MCPServer.main()
+        case "mcp-lazy": return McpLazy.main(a)
         case "peer": return Peers.main(a)
         case "integrator": return Integrators.main(a)
         case "iphone": return IPhones.main(a)

@@ -119,6 +119,11 @@ at once, desktop app and terminal alike:
   is allowed here and shares its devices there, both on the Device Manager page, which lists the
   Macs found in `~/.ssh/config` and on Tailscale with their load and devices. Leases end with the
   session that took them, and an emulator booted there is shut down again.
+- **MCP servers only while they are used.** Claude Code starts every configured MCP server with every
+  session. Put `RigWatch mcp-lazy --` in front of a server's command and a session's startup questions (its
+  tools, prompts and resources) are answered from what the server said last time; the server starts at the
+  first real call and stops again after 5 minutes unused (`--idle SECONDS`). For example:
+  `"command": "rigwatch", "args": ["mcp-lazy", "--", "npx", "-y", "rea-agents@6.3.0", "mcp"]`.
 - **Physical devices first.** Booting an emulator or simulator is refused while a phone of that kind
   is connected or another virtual one is already running. `RIGWATCH_VIRTUAL=1` in front of the command
   lets it through.
