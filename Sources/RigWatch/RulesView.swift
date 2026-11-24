@@ -194,7 +194,7 @@ struct RulesView: View {
                     Stepper(value: $s.maxSimulators, in: 1...8) { setting("\(s.maxSimulators) simulators") }
                 }
                 rule("Shut down idle emulators and simulators", $s.reapDevices,
-                     "After this long with no command or device tool naming it. Only ones an agent session started; one you opened yourself is never shut down. Pinned devices are kept.") {
+                     "After this long with no command or device tool using it. Emulators only when an agent session started them. A simulator counts as used only when something uses that one (not any iOS build); one nobody is known to have started goes after twice this, at least an hour. Pinned devices are kept.") {
                     Stepper(value: $s.deviceIdleMinutes, in: 10...240, step: 10) { setting("\(s.deviceIdleMinutes) min") }
                     Stepper(value: $s.deviceIdleWithPhoneMinutes, in: 5...240, step: 5) { setting("\(s.deviceIdleWithPhoneMinutes) min with a phone connected") }
                 }

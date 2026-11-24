@@ -182,6 +182,7 @@ enum Rules {
         return matches(deviceIds, here).filter { $0.hasPrefix("emulator-") || FileManager.default.fileExists(atPath: sims + $0) }
     }
     static let deviceTool = rx(#"(?i)mobile|device|emulator|simulator|maestro|adb|android|ios"#)
+    static let iosTool = rx(#"(?i)simulator|iphone|\bios|_ios"#)
 
     static func classify(_ cmd: String) -> String? {
         let cmd = runs(cmd)
@@ -242,10 +243,63 @@ enum Rules {
     }
 
     /// Records that a command used a platform's devices, and which ones it named, for the idle check.
-    static func noteUse(_ cmd: String) {
-        let cmd = runs(cmd)
-        for u in uses where has(u.rx, cmd) { touch(u.plat) }
-        localDeviceIds(cmd).forEach(touch)
+    /// A simulator counts only when a command uses it: by UDID, by `booted`, or by its name (an xcodebuild destination,
+    /// a device tool's argument). A build, `simctl list` or anything else that names no simulator keeps none alive;
+    /// with many sessions building all day, counting those kept every simulator up for good.
+    static func noteUse(_ original: String) {
+        let cmd = runs(original)
+        for u in uses where u.plat != "ios" && has(u.rx, cmd) { touch(u.plat) }
+        // A destination or simulator name is quoted, and runs() drops quoted text: read it from the whole command
+        // when the command really runs simctl or xcodebuild.
+        let simText = cmd.contains("simctl") || cmd.contains("xcodebuild") ? original : cmd
+        Set(localDeviceIds(cmd) + simsUsed(simText)).forEach(touch)
+        // xcodebuild boots its destination simulator itself: note it as an agent boot, as simctl boot is.
+        if cmd.contains("xcodebuild"), simText.contains("Simulator") {
+            for m in destinationSim.matches(in: simText, range: NSRange(simText.startIndex..., in: simText)) {
+                for g in 1..<m.numberOfRanges { if let r = Range(m.range(at: g), in: simText) { touch("boot-" + simText[r].trimmingCharacters(in: .whitespaces)) } }
+            }
+        }
+    }
+
+    /// `name=` and `id=` of an xcodebuild -destination.
+    static let destinationSim = rx(#"(?:^|[,'"\s])name=([^,'"\\;)\n]+)|(?:^|[,'"\s])id=([0-9A-F-]{36})"#)
+    static let simctlBooted = rx(#"\bsimctl\b[^;&|\n]*\sbooted\b"#)
+
+    /// Booted simulators of this Mac, from each device's device.plist (state 3 is booted): quick enough for the hook,
+    /// which can't wait on simctl.
+    static func bootedSims() -> [(udid: String, name: String)] {
+        let dir = Sh.home + "/Library/Developer/CoreSimulator/Devices/"
+        return ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).compactMap { u in
+            guard u.count == 36, let d = FileManager.default.contents(atPath: dir + u + "/device.plist"),
+                  let p = (try? PropertyListSerialization.propertyList(from: d, format: nil)) as? [String: Any],
+                  (p["state"] as? Int) == 3 else { return nil }
+            return (u, p["name"] as? String ?? "")
+        }
+    }
+
+    /// The booted simulators a command or tool call uses without giving a UDID: `simctl … booted`, or one named
+    /// (`name=iPhone 17 Pro` in a destination, `"iPhone 17 Pro"` as an argument).
+    static func simsUsed(_ text: String) -> [String] {
+        guard ["simctl", "xcodebuild", "booted", "name=", "\""].contains(where: text.contains) else { return [] }
+        let sims = bootedSims()
+        guard !sims.isEmpty else { return [] }
+        var out = Set<String>()
+        if has(simctlBooted, text) { out.formUnion(sims.map(\.udid)) }
+        for s in sims where !s.name.isEmpty {
+            let n = NSRegularExpression.escapedPattern(for: s.name)
+            if has(rx(#"(?:name=|["'])"# + n + #"(?=[,'"\\;)\n]|$)"#), text) { out.insert(s.udid) }
+        }
+        return out.sorted()
+    }
+
+    /// The simulators a session last named, so a device-tool call that names none (the iOS simulator tool keeps
+    /// to the session's own) counts for those.
+    static func sessionDevices(_ session: String) -> [String] {
+        ((try? String(contentsOfFile: touchPath("session-" + session), encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+    }
+    static func setSessionDevices(_ session: String, _ ids: [String]) {
+        try? FileManager.default.createDirectory(atPath: touchDir, withIntermediateDirectories: true)
+        try? ids.joined(separator: "\n").write(toFile: touchPath("session-" + session), atomically: true, encoding: .utf8)
     }
 
     /// The AVD or simulator an agent's boot command names, recorded so the clean-up knows an agent started it.
@@ -260,7 +314,8 @@ enum Rules {
     /// True when an agent's boot command named this device within five minutes of it starting.
     static func agentBooted(_ d: Device) -> Bool {
         guard let started = d.started else { return false }
-        return [d.id, d.name].contains { k in touched("boot-" + k).map { abs(started.timeIntervalSince($0)) < 300 } ?? false }
+        let keys = [d.id, d.name] + (d.kind == .simulator ? ["any-ios"] : [])
+        return keys.contains { k in touched("boot-" + k).map { abs(started.timeIntervalSince($0)) < 300 } ?? false }
     }
 
     /// The cap on running virtual devices of a platform, or nil when there is none.
@@ -428,9 +483,20 @@ enum Rules {
         case _ where tool.hasPrefix("mcp__"):
             // Device tools drive emulators and simulators without a shell: note their use so the clean-up leaves the device alone.
             let text = (try? JSONSerialization.data(withJSONObject: ti)).map { String(decoding: $0, as: UTF8.self) } ?? ""
-            let ids = localDeviceIds(text)
+            var ids = Array(Set(localDeviceIds(text) + simsUsed(text))).sorted()
+            let session = j["session_id"] as? String ?? ""
+            let onSim = has(Self.iosTool, tool)
+            if onSim, ids.isEmpty {
+                // No device named: the session's own simulator, else the only one booted, else every booted one (a
+                // session is driving a simulator right now, and it may be any of them).
+                let booted = bootedSims().map(\.udid)
+                let mine = session.isEmpty ? [] : sessionDevices(session).filter(booted.contains)
+                ids = !mine.isEmpty ? mine : booted
+                if booted.isEmpty { touch("boot-any-ios") }   // it may be about to boot one
+            }
+            if !session.isEmpty, ids.contains(where: { $0.count == 36 }) { setSessionDevices(session, ids.filter { $0.count == 36 }) }
             ids.forEach(touch)
-            if ids.isEmpty && has(deviceTool, tool) { touch("any-device") }
+            if ids.isEmpty && has(deviceTool, tool) { touch("any-device") }   // counts for emulators only
             return nil
         default: return nil
         }
@@ -755,18 +821,28 @@ enum Rules {
         write(try? JSONEncoder().encode(p.sorted()), to: pinsFile)
     }
 
-    /// An app running in a simulator burns CPU; an idle home screen barely does. True when the
-    /// simulator's processes used over 5 CPU-seconds since the last clean-up that acted.
+    /// An app being used or tested in a simulator burns CPU. True when the simulator's apps (not its own system
+    /// processes) averaged over a tenth of a core since the last clean-up that acted. The simulator's ~280 system
+    /// processes use about 3.5 CPU-seconds a minute on an idle home screen, so counting them (as before, over
+    /// 5 CPU-seconds in all) made every booted simulator look busy at every clean-up, and none was ever shut down.
     static func simBusy(_ d: Device, _ procs: [Proc], save: Bool) -> Bool {
         guard let root = d.pid else { return false }
+        let byPid = Dictionary(procs.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
         var kids: [Int32: [Int32]] = [:]
         for p in procs { kids[p.ppid, default: []].append(p.pid) }
         var total = 0.0, stack = kids[root] ?? []
-        while let x = stack.popLast() { total += ProcSampler.cpuSeconds(x) ?? 0; stack += kids[x] ?? [] }
-        let f = touchPath("simcpu-" + d.id)
-        let prev = (try? String(contentsOfFile: f, encoding: .utf8)).flatMap(Double.init)
+        while let x = stack.popLast() {
+            if let p = byPid[x], p.path.contains("/Containers/Bundle/Application/") || p.path.contains("/data/Containers/") {
+                total += ProcSampler.cpuSeconds(x) ?? 0
+            }
+            stack += kids[x] ?? []
+        }
+        let f = touchPath("simcpu-" + d.id), now = Date()
+        let prevCPU = (try? String(contentsOfFile: f, encoding: .utf8)).flatMap(Double.init), prevAt = touched("simcpu-" + d.id)
         if save { touch("simcpu-" + d.id); try? String(total).write(toFile: f, atomically: true, encoding: .utf8) }
-        return prev.map { total - $0 > 5 } ?? false
+        guard let prevCPU, let prevAt, now.timeIntervalSince(prevAt) >= 60 else { return false }
+        // An app that quit since then makes the total drop: what is left still counts.
+        return max(0, total - prevCPU) / now.timeIntervalSince(prevAt) > 0.10
     }
 
     // MARK: clean-up
@@ -833,18 +909,23 @@ enum Rules {
             let phys = ios ? [] : androidPhys   // a real iPhone isn't used in a simulator's place (installs on it ask the user)
             let busy = ios && simBusy(d, procs, save: apply)
             if busy && apply { touch(d.id) }
-            let limit = TimeInterval((phys.isEmpty ? s.deviceIdleMinutes : s.deviceIdleWithPhoneMinutes) * 60)
-            // With a physical device attached, adb and simctl calls that name no device are for it: only calls naming this one count.
-            let last = [busy ? now : nil, phys.isEmpty ? touched(ios ? "ios" : "android") : nil, touched(d.id), touched("any-device"), d.started]
+            let byAgent = d.launchedBy != nil || agentBooted(d)
+            var limit = TimeInterval((phys.isEmpty ? s.deviceIdleMinutes : s.deviceIdleWithPhoneMinutes) * 60)
+            // A simulator nobody is known to have started (Xcode, agent-device, a tool, or a person) still goes, after
+            // twice the idle time and at least an hour: unused ones otherwise stayed up for days.
+            if ios && !byAgent { limit = max(3600, 2 * limit) }
+            // With a physical device attached, adb calls that name no device are for it: only calls naming this one count.
+            // A simulator counts only what used it (see noteUse), not every iOS build or device tool call.
+            let last = [busy ? now : nil, !ios && phys.isEmpty ? touched("android") : nil, touched(d.id), ios ? nil : touched("any-device"), d.started]
                 .compactMap { $0 }.max() ?? .distantPast
             let idle = now.timeIntervalSince(last)
             let name = "\(d.name) (\(d.id))"
             if pinned.contains(d.id) || pinned.contains(d.name) { r.kept.append("\(name): pinned"); continue }
             if let l = d.lease { r.kept.append("\(name): \(l.isImplicit ? "in use by" : "leased to") session \(l.session)\(l.isImplicit ? "" : " until \(Leases.time(l.until))")"); continue }
             if let c = d.claim { r.kept.append("\(name): held by agent-device for session \(c.session)"); continue }
-            // Only what an agent started: a device a person opened may be in use without any command naming it.
-            guard d.launchedBy != nil || agentBooted(d) else { r.kept.append("\(name): not started by an agent session"); continue }
-            guard idle > limit else { r.kept.append("\(name): used \(Fmt.ago(last))"); continue }
+            // Emulators only when an agent started them: one a person opened may be in use without any command naming it.
+            guard byAgent || ios else { r.kept.append("\(name): not started by an agent session"); continue }
+            guard idle > limit else { r.kept.append("\(name): used \(Fmt.ago(last))" + (byAgent ? "" : "; not started by an agent session, so it goes after \(Int(limit / 60)) min idle")); continue }
             var a = ReapAction(kind: "Shut down", target: d.name, key: d.id,
                                detail: "\(d.kind.rawValue), idle \(Fmt.ago(last).replacingOccurrences(of: " ago", with: ""))" + (phys.isEmpty ? "" : " · \(phys.joined(separator: ", ")) connected"),
                                bytes: Int64(d.mem))

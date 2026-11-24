@@ -131,9 +131,13 @@ at once, desktop app and terminal alike:
   command is refused, with no override, and `acquire_device` boots nothing. Boots RigWatch can't see
   (Xcode, a test run, other device tools) still happen; the Device Manager page shows when the limit
   is passed.
-- **Shut down idle emulators and simulators** after 30 minutes with no command or device tool naming
-  them (10 with a phone connected). Only ones an agent session started; one you opened yourself is
-  never shut down. Pin one to keep it.
+- **Shut down idle emulators and simulators** after 30 minutes with no command or device tool using
+  them (10 with a phone connected). An emulator only when an agent session started it; one you opened
+  yourself is never shut down. A simulator counts as used only when something uses that simulator: its
+  UDID, `simctl … booted`, its name in an `xcodebuild -destination` or a device tool, or a running app
+  (CPU). An iOS build or `simctl list` keeps no simulator up. A simulator nobody is known to have
+  started (Xcode, a test run, a device tool, you) goes after an hour idle (twice the setting). Pin one
+  to keep it.
 - **Clean up idle worktrees** untouched for a day: a clean one is removed (its branch and commits
   stay); one with uncommitted work, commits on no remote or untracked files keeps its source and loses
   only build folders git ignores. `node_modules` is kept aside first and cloned back (APFS, seconds,
