@@ -18,7 +18,8 @@ final class McpLazy {
         }
         if args.first == "--" { args.removeFirst() }
         guard !args.isEmpty else { Rules.say("usage: RigWatch mcp-lazy [--idle SECONDS] -- COMMAND ARGS…"); return 2 }
-        McpLazy(command: args, idle: idle).run()
+        let lazy = McpLazy(command: args, idle: idle)
+        withExtendedLifetime(lazy) { lazy.run() }   // the timer and reader hold it weakly
         return 0
     }
 
@@ -75,6 +76,17 @@ final class McpLazy {
         guard let msg = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { forward(line); return }
         let method = msg["method"] as? String, id = msg["id"]
         if method == "initialize" { clientInit = msg }
+        // Newer clients probe with server/discover before initialize; servers that don't know it say so and the
+        // client falls back to initialize. Answered here, so a probe doesn't start the server at every session start.
+        if method == "server/discover", let id, child == nil || starting {
+            send(["jsonrpc": "2.0", "id": id, "error": ["code": -32601, "message": "Method not found: server/discover"]]); return
+        }
+        // The running server was initialized by us; a session's initialize is answered from that answer (passing it on
+        // gets "already initialized"), and its initialized notification is ours, already sent.
+        if child != nil && !starting {
+            if method == "initialize", let id, let r = cache["initialize"] { reply(id, r); return }
+            if method == "notifications/initialized" { return }
+        }
         if child == nil && !starting {
             if let method, let id {
                 if method == "ping" { reply(id, [:]); return }
